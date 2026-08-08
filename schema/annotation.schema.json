@@ -1,0 +1,244 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://your-org/longvideo-bench/schema/v1.json",
+  "title": "LongVideoBench Annotation Schema (bilingual zh/en)",
+  "type": "object",
+  "required": ["schema_version", "video_id", "meta", "media", "structure", "global", "qa", "annotation_meta"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "video_id": { "type": "string", "pattern": "^[a-z]+_[0-9]{5}$" },
+
+    "meta": {
+      "type": "object",
+      "required": ["genre", "title", "duration_sec", "duration_bucket", "source", "license", "primary_lang"],
+      "properties": {
+        "genre": { "enum": ["movie","documentary","tv_series","variety","sports","lecture","tutorial","interview","vlog","egocentric","animation"] },
+        "title": { "$ref": "#/$defs/LangText" },
+        "duration_sec": { "type": "number", "minimum": 0 },
+        "duration_bucket": { "enum": ["<5m","5-15m","15-40m","40m-2h",">2h"] },
+        "source": { "type": "string" },
+        "license": { "type": "string" },
+        "url": { "type": ["string","null"] },
+        "release_date": { "type": ["string","null"], "format": "date" },
+        "primary_lang": { "enum": ["zh","en"] },
+        "has_subtitle": { "type": "boolean" },
+        "subtitle_langs": { "type": "array", "items": { "enum": ["zh","en"] } }
+      }
+    },
+
+    "media": {
+      "type": "object",
+      "required": ["video_path", "fps"],
+      "properties": {
+        "video_path": { "type": "string" },
+        "audio_path": { "type": ["string","null"] },
+        "fps": { "type": "number" },
+        "resolution": { "type": "string" }
+      }
+    },
+
+    "structure": {
+      "type": "object",
+      "required": ["shots", "scenes", "events"],
+      "properties": {
+        "shots": { "type": "array", "items": { "$ref": "#/$defs/Shot" } },
+        "scenes": { "type": "array", "items": { "$ref": "#/$defs/Scene" } },
+        "events": { "type": "array", "items": { "$ref": "#/$defs/Event" } },
+        "segments": { "type": "array", "items": { "$ref": "#/$defs/DescSegment" } },
+        "subtitles": { "type": "array", "items": { "$ref": "#/$defs/Subtitle" } },
+        "ocr": { "type": "array", "items": { "$ref": "#/$defs/OCRSpan" } }
+      }
+    },
+
+    "global": {
+      "type": "object",
+      "required": ["synopsis", "characters", "relations", "timeline"],
+      "properties": {
+        "synopsis": { "$ref": "#/$defs/LangText" },
+        "characters": { "type": "array", "items": { "$ref": "#/$defs/Character" } },
+        "relations": { "type": "array", "items": { "$ref": "#/$defs/Relation" } },
+        "timeline": { "type": "array", "items": { "type": "string" } },
+        "detailed_description": { "$ref": "#/$defs/LangText" }
+      }
+    },
+
+    "qa": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/QAItem" } },
+
+    "annotation_meta": {
+      "type": "object",
+      "required": ["created_date", "annotators"],
+      "properties": {
+        "created_date": { "type": "string", "format": "date" },
+        "annotators": { "type": "array", "items": { "type": "string" } },
+        "iaa_alpha": { "type": ["number","null"] },
+        "review_status": { "enum": ["draft","verified","final"] }
+      }
+    }
+  },
+
+  "$defs": {
+    "LangText": {
+      "type": "object",
+      "properties": {
+        "zh": { "type": ["string","null"] },
+        "en": { "type": ["string","null"] }
+      },
+      "anyOf": [ { "required": ["zh"] }, { "required": ["en"] } ]
+    },
+    "Shot": {
+      "type": "object",
+      "required": ["id", "start", "end"],
+      "properties": {
+        "id": { "type": "integer" },
+        "start": { "type": "number" },
+        "end": { "type": "number" },
+        "desc": { "$ref": "#/$defs/LangText" },
+        "keyframe_path": { "type": ["string","null"] }
+      }
+    },
+    "Scene": {
+      "type": "object",
+      "required": ["id", "start", "end", "summary"],
+      "properties": {
+        "id": { "type": "integer" },
+        "start": { "type": "number" },
+        "end": { "type": "number" },
+        "shot_ids": { "type": "array", "items": { "type": "integer" } },
+        "summary": { "$ref": "#/$defs/LangText" },
+        "characters": { "type": "array", "items": { "type": "string" } },
+        "location": { "$ref": "#/$defs/LangText" },
+        "emotion": { "type": ["string","null"] }
+      }
+    },
+    "Event": {
+      "type": "object",
+      "required": ["id", "span", "desc"],
+      "properties": {
+        "id": { "type": "string" },
+        "span": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+        "desc": { "$ref": "#/$defs/LangText" },
+        "scene_id": { "type": ["integer","null"] },
+        "type": { "type": ["string","null"] },
+        "causes": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "DescSegment": {
+      "type": "object",
+      "required": ["start", "end", "description"],
+      "properties": {
+        "start": { "type": "number" },
+        "end": { "type": "number" },
+        "description": { "$ref": "#/$defs/LangText" }
+      }
+    },
+    "Subtitle": {
+      "type": "object",
+      "required": ["start", "end", "text", "lang"],
+      "properties": {
+        "start": { "type": "number" },
+        "end": { "type": "number" },
+        "text": { "type": "string" },
+        "lang": { "enum": ["zh","en"] },
+        "speaker": { "type": ["string","null"] }
+      }
+    },
+    "OCRSpan": {
+      "type": "object",
+      "required": ["start", "end", "text"],
+      "properties": {
+        "start": { "type": "number" },
+        "end": { "type": "number" },
+        "text": { "type": "string" },
+        "bbox": { "type": ["array","null"], "items": { "type": "number" } }
+      }
+    },
+    "Character": {
+      "type": "object",
+      "required": ["id", "name"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "$ref": "#/$defs/LangText" },
+        "role": { "$ref": "#/$defs/LangText" },
+        "description": { "$ref": "#/$defs/LangText" }
+      }
+    },
+    "Relation": {
+      "type": "object",
+      "required": ["src", "dst", "type"],
+      "properties": {
+        "src": { "type": "string" },
+        "dst": { "type": "string" },
+        "type": { "$ref": "#/$defs/LangText" },
+        "directed": { "type": "boolean", "default": true }
+      }
+    },
+    "QAItem": {
+      "type": "object",
+      "required": ["qid", "task_type", "capability", "lang_mode", "question", "evidence_spans", "min_watch", "anti_shortcut", "split", "provenance"],
+      "properties": {
+        "qid": { "type": "string" },
+        "task_type": { "enum": ["mcq","open","temporal_grounding","summary"] },
+        "capability": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "enum": [
+              "L1_object","L1_ocr","L1_action","L1_audio_asr","L1_audio_event","L1_speaker",
+              "L2_grounding","L2_ordering","L2_counting","L2_duration","L2_state_change",
+              "L3_causal","L3_intent","L3_counterfactual","L3_prediction","L3_math_rule",
+              "L4_subtitle_visual","L4_narration_align","L4_audio_visual",
+              "L5_summary","L5_relation_graph","L5_cross_scene","L5_needle","L5_foreshadow"
+            ]
+          }
+        },
+        "lang_mode": { "enum": ["native","parallel","cross_lingual"] },
+        "video_lang": { "enum": ["zh","en"] },
+        "question_lang": { "enum": ["zh","en"] },
+        "question": { "$ref": "#/$defs/LangText" },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "text"],
+            "properties": {
+              "id": { "enum": ["A","B","C","D"] },
+              "text": { "$ref": "#/$defs/LangText" },
+              "distractor_trap": { "enum": ["none","single_frame","language_prior","subtitle_only","plausible_unhappened"] }
+            }
+          }
+        },
+        "answer": { "enum": ["A","B","C","D"] },
+        "reference_answer": { "$ref": "#/$defs/LangText" },
+        "temporal_target": { "type": ["array","null"], "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+        "evidence_spans": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 }
+        },
+        "evidence_modality": { "type": "array", "items": { "enum": ["visual","subtitle","audio","ocr"] } },
+        "min_watch": { "enum": ["single_scene","cross_scene","whole_video"] },
+        "difficulty": { "enum": ["easy","medium","hard"] },
+        "anti_shortcut": {
+          "type": "object",
+          "required": ["blind_llm_pass", "single_frame_pass", "subtitle_only_pass"],
+          "properties": {
+            "blind_llm_pass": { "type": "boolean" },
+            "single_frame_pass": { "type": "boolean" },
+            "subtitle_only_pass": { "type": "boolean" },
+            "checked_by": { "type": ["string","null"] },
+            "checked_date": { "type": ["string","null"], "format": "date" }
+          }
+        },
+        "is_gold": { "type": "boolean", "default": false },
+        "split": { "enum": ["dev","test"] },
+        "provenance": { "enum": ["human","llm_assisted"] },
+        "annotator_id": { "type": "string" },
+        "verifier_ids": { "type": "array", "items": { "type": "string" } }
+      },
+      "allOf": [
+        { "if": { "properties": { "task_type": { "const": "mcq" } } }, "then": { "required": ["options", "answer"] } },
+        { "if": { "properties": { "task_type": { "const": "temporal_grounding" } } }, "then": { "required": ["temporal_target"] } }
+      ]
+    }
+  }
+}

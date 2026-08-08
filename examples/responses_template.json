@@ -1,0 +1,11 @@
+{
+  "_comment": "验证者独立作答记录。每题应有 ≥2 名验证者。answer 为其独立选出的选项;标准答案与黄金题从标注文件读取,不在此重复。",
+  "responses": [
+    { "qid": "doc_00001_q01", "annotator": "ann_07", "answer": "B" },
+    { "qid": "doc_00001_q01", "annotator": "ann_11", "answer": "B" },
+    { "qid": "doc_00001_q02", "annotator": "ann_07", "answer": "C" },
+    { "qid": "doc_00001_q02", "annotator": "ann_11", "answer": "A" },
+    { "qid": "doc_00001_q03", "annotator": "ann_07", "answer": "A" },
+    { "qid": "doc_00001_q03", "annotator": "ann_11", "answer": "D" }
+  ]
+}

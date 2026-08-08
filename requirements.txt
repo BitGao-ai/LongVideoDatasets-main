@@ -1,0 +1,14 @@
+# === LLM 标注流水线(annotator/)===
+openai>=1.30          # 统一走 OpenAI 兼容接口调用 Qwen(DashScope)/ Kimi(Moonshot)
+opencv-python>=4.8    # 抽帧
+numpy>=1.24
+jsonschema>=4.0       # 输出按 schema 校验
+
+# === 详述 native_video 模式(可选,仅 Qwen)===
+# dashscope>=1.17     # 原生视频输入(MultiModalConversation);另需系统安装 ffmpeg
+
+# === 预处理(preprocess.py,建议独立虚拟环境安装)===
+# scenedetect[opencv]>=0.6   # 镜头分割
+# whisperx>=3.1              # 中英字幕 + 词级时间戳 + 说话人
+# paddleocr>=2.7             # 屏幕文字 OCR
+# paddlepaddle-gpu           # 或 paddlepaddle(CPU)

@@ -1,0 +1,22 @@
+{
+  "video_id": "doc_00001",
+  "meta": {
+    "genre": "documentary",
+    "title": { "zh": "示例标题", "en": "Example Title" },
+    "duration_sec": 3600,
+    "duration_bucket": "40m-2h",
+    "source": "YouTube-CC",
+    "license": "CC-BY-4.0",
+    "url": null,
+    "release_date": "2020-01-01",
+    "primary_lang": "en",
+    "has_subtitle": true,
+    "subtitle_langs": ["en", "zh"]
+  },
+  "media": {
+    "video_path": "videos/doc_00001.mp4",
+    "audio_path": null,
+    "fps": 25,
+    "resolution": "1920x1080"
+  }
+}
