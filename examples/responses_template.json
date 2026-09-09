@@ -1,11 +1,15 @@
 {
-  "_comment": "验证者独立作答记录。每题应有 ≥2 名验证者。answer 为其独立选出的选项;标准答案与黄金题从标注文件读取,不在此重复。",
+  "_comment": "验证者独立作答记录 v2。每题应有 ≥2 名验证者。字段按题型取用:mcq 用 answer(独立选出的选项);temporal_grounding 用 interval([start, end] 秒);open/summary 用 text(自由作答)。标准答案与黄金题从标注文件读取,不在此重复。",
   "responses": [
     { "qid": "doc_00001_q01", "annotator": "ann_07", "answer": "B" },
     { "qid": "doc_00001_q01", "annotator": "ann_11", "answer": "B" },
     { "qid": "doc_00001_q02", "annotator": "ann_07", "answer": "C" },
     { "qid": "doc_00001_q02", "annotator": "ann_11", "answer": "A" },
     { "qid": "doc_00001_q03", "annotator": "ann_07", "answer": "A" },
-    { "qid": "doc_00001_q03", "annotator": "ann_11", "answer": "D" }
+    { "qid": "doc_00001_q03", "annotator": "ann_11", "answer": "D" },
+    { "qid": "doc_00001_t01", "annotator": "ann_07", "interval": [12.0, 34.5] },
+    { "qid": "doc_00001_t01", "annotator": "ann_11", "interval": [10.0, 30.0] },
+    { "qid": "doc_00001_o01", "annotator": "ann_07", "text": "主角在婚礼上说出誓词时,镜头缓缓推近新娘的特写。" },
+    { "qid": "doc_00001_o01", "annotator": "ann_11", "text": "新娘听到誓词后先是惊讶,然后露出微笑。" }
   ]
 }

@@ -1,12 +1,18 @@
 # -*- coding: utf-8 -*-
-"""媒体工具:抽帧 + base64 编码、字幕/OCR 按时间窗切片、镜头合并成窗口。"""
+"""媒体工具:抽帧(帧索引化,Res 1.1)+ base64 编码、字幕/OCR 按时间窗切片、镜头合并成窗口。
+
+注意:本模块不再使用 cv2 CAP_PROP_POS_MSEC 直接 seek(REVIEW D9/D3-6)。
+所有“抽帧/单帧”都优先走 frames_store.FrameStore(ffmpeg 1fps 帧索引);
+无帧索引时回退 cv2 顺序解码(自维护时间轴),由 FrameStore.build 的兜底路径提供。
+"""
 
 import base64
 import logging
 from typing import Dict, List, Optional, Tuple
 
 import cv2
-import numpy as np
+
+from .frames_store import FrameStore
 
 log = logging.getLogger("annotator.media")
 
@@ -21,35 +27,73 @@ def _encode_frame(frame, max_edge: int) -> Optional[str]:
 
 
 def sample_frames(video_path: str, start: float, end: float, k: int,
-                  max_edge: int = 768) -> List[Tuple[float, str]]:
-    """在 [start, end] 内均匀采样 k 帧(去掉端点),返回 [(秒, base64_jpeg)]。"""
+                  max_edge: int = 768, store: Optional[FrameStore] = None
+                  ) -> List[Tuple[float, str]]:
+    """在 [start, end] 内均匀采样 k 帧(去掉端点),返回 [(秒, base64_jpeg)]。
+
+    有帧索引(store)时从帧索引取(精确、无二次 seek);否则顺序解码兜底。
+    """
     if k <= 0 or end <= start:
         return []
+    if store is not None:
+        times = store.sample_times(start, end, k)
+        return store.frames_b64(times, max_edge)
+
+    # 兜底:cv2 顺序解码(自维护时间轴,误差 <1 帧)
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         log.error("无法打开视频: %s", video_path)
         return []
-    times = np.linspace(start, end, k + 2)[1:-1]
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    total = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    if total and fps:
+        i0, i1 = int(start * fps), int(end * fps)
+        step = max(1, int((i1 - i0) / (k + 1)))
+    else:
+        step, i0, i1 = 1, 0, 0
     out: List[Tuple[float, str]] = []
-    for t in times:
-        cap.set(cv2.CAP_PROP_POS_MSEC, float(t) * 1000.0)
+    idx = 0
+    while True:
         ok, frame = cap.read()
-        if ok:
+        if not ok:
+            break
+        if i0 <= idx <= i1 and (idx - i0) % step == 0 and (idx - i0) > 0:
             b64 = _encode_frame(frame, max_edge)
             if b64:
-                out.append((round(float(t), 3), b64))
+                out.append((round(idx / fps, 3), b64))
+            if len(out) >= k:
+                break
+        idx += 1
     cap.release()
     return out
 
 
-def one_frame(video_path: str, t: float, max_edge: int = 768) -> Optional[str]:
+def one_frame(video_path: str, t: float, max_edge: int = 768,
+              store: Optional[FrameStore] = None) -> Optional[str]:
+    """取 t 时刻 1 帧(有帧索引则取 ≤t 最近帧,否则顺序解码兜底)。"""
+    if store is not None:
+        return store.frame_b64(t, max_edge)
+    return _one_frame_sequential(video_path, t, max_edge)
+
+
+def _one_frame_sequential(video_path: str, t: float, max_edge: int) -> Optional[str]:
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return None
-    cap.set(cv2.CAP_PROP_POS_MSEC, float(t) * 1000.0)
-    ok, frame = cap.read()
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    target = int(t * fps)
+    frame = None
+    idx = 0
+    while True:
+        ok, f = cap.read()
+        if not ok:
+            break
+        if idx == target:
+            frame = f
+            break
+        idx += 1
     cap.release()
-    return _encode_frame(frame, max_edge) if ok else None
+    return _encode_frame(frame, max_edge) if frame is not None else None
 
 
 # --------- 字幕 / OCR 按窗切片 ---------

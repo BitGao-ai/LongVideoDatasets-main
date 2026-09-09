@@ -1,18 +1,26 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://your-org/longvideo-bench/schema/v1.json",
-  "title": "LongVideoBench Annotation Schema (bilingual zh/en)",
+  "$id": "https://your-org/longvideo-bench/schema/v2.json",
+  "title": "LongVideoBench Annotation Schema v2 (bilingual zh/en)",
+  "description": "v2: 新增 shot.desc / audio_events / themes / turning_points / motifs / 事件重要性·边界状态·去重 / QA referring_ctx·verification·quality_flags / annotation_meta gaps·stats·human_todo·stages(Res §9)。新增字段全可选,v1 产物可无损迁移。",
   "type": "object",
   "required": ["schema_version", "video_id", "meta", "media", "structure", "global", "qa", "annotation_meta"],
   "properties": {
-    "schema_version": { "const": "1.0" },
-    "video_id": { "type": "string", "pattern": "^[a-z]+_[0-9]{5}$" },
+    "schema_version": { "const": "2.0" },
+    "video_id": {
+      "type": "string",
+      "description": "视频 ID,批量模式取自文件名(去扩展名)。原 ^[a-z]+_[0-9]{5}$ 过严,任何非该命名的素材都无法通过校验。",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
 
     "meta": {
       "type": "object",
       "required": ["genre", "title", "duration_sec", "duration_bucket", "source", "license", "primary_lang"],
       "properties": {
-        "genre": { "enum": ["movie","documentary","tv_series","variety","sports","lecture","tutorial","interview","vlog","egocentric","animation"] },
+        "genre": {
+          "description": "\"unknown\" 仅用于自动生成的 meta 占位,发布前必须由人工改成真实题材。",
+          "enum": ["movie","documentary","tv_series","variety","sports","lecture","tutorial","interview","vlog","egocentric","animation","unknown"]
+        },
         "title": { "$ref": "#/$defs/LangText" },
         "duration_sec": { "type": "number", "minimum": 0 },
         "duration_bucket": { "enum": ["<5m","5-15m","15-40m","40m-2h",">2h"] },
@@ -46,7 +54,11 @@
         "events": { "type": "array", "items": { "$ref": "#/$defs/Event" } },
         "segments": { "type": "array", "items": { "$ref": "#/$defs/DescSegment" } },
         "subtitles": { "type": "array", "items": { "$ref": "#/$defs/Subtitle" } },
-        "ocr": { "type": "array", "items": { "$ref": "#/$defs/OCRSpan" } }
+        "subtitles_meta": { "type": "object", "properties": { "diarize_failed": { "type": "boolean" } } },
+        "ocr": { "type": "array", "items": { "$ref": "#/$defs/OCRSpan" } },
+        "audio_events": { "type": "array", "items": { "$ref": "#/$defs/AudioEvent" } },
+        "frames_index_url": { "type": ["string","null"] },
+        "manifest_version": { "type": ["string","null"] }
       }
     },
 
@@ -58,7 +70,10 @@
         "characters": { "type": "array", "items": { "$ref": "#/$defs/Character" } },
         "relations": { "type": "array", "items": { "$ref": "#/$defs/Relation" } },
         "timeline": { "type": "array", "items": { "type": "string" } },
-        "detailed_description": { "$ref": "#/$defs/LangText" }
+        "detailed_description": { "$ref": "#/$defs/LangText" },
+        "themes": { "type": "array", "items": { "$ref": "#/$defs/Theme" } },
+        "turning_points": { "type": "array", "items": { "$ref": "#/$defs/TurningPoint" } },
+        "motifs": { "type": "array", "items": { "$ref": "#/$defs/Motif" } }
       }
     },
 
@@ -71,7 +86,25 @@
         "created_date": { "type": "string", "format": "date" },
         "annotators": { "type": "array", "items": { "type": "string" } },
         "iaa_alpha": { "type": ["number","null"] },
-        "review_status": { "enum": ["draft","verified","final"] }
+        "review_status": { "enum": ["draft","verified","final"] },
+        "manifest_version": { "type": "string" },
+        "gaps": { "type": "array", "items": { "$ref": "#/$defs/Gap" } },
+        "stats": { "type": "object", "properties": {
+          "coverage_gaps": { "type": "number" },
+          "event_density": { "type": "number" },
+          "qa_per_hour": { "type": "number" },
+          "refined_ratio": { "type": "number" },
+          "rejected_ratio": { "type": "number" },
+          "key_events": { "type": "integer" },
+          "quiet_segments": { "type": "array", "items": { "type": "object" } },
+          "verify_agreement": { "type": ["number","null"] },
+          "filter_kept": { "type": "integer" },
+          "filter_dropped": { "type": "integer" }
+        } },
+        "human_todo": { "type": "array", "items": { "$ref": "#/$defs/HumanTodo" } },
+        "frames_index": { "type": "object" },
+        "stages": { "type": "object" },
+        "release_rejected_reasons": { "type": "array", "items": { "type": "string" } }
       }
     }
   },
@@ -93,7 +126,8 @@
         "start": { "type": "number" },
         "end": { "type": "number" },
         "desc": { "$ref": "#/$defs/LangText" },
-        "keyframe_path": { "type": ["string","null"] }
+        "keyframe_path": { "type": ["string","null"] },
+        "keyframes": { "type": "array", "items": { "type": "number" } }
       }
     },
     "Scene": {
@@ -119,7 +153,15 @@
         "desc": { "$ref": "#/$defs/LangText" },
         "scene_id": { "type": ["integer","null"] },
         "type": { "type": ["string","null"] },
-        "causes": { "type": "array", "items": { "type": "string" } }
+        "causes": { "type": "array", "items": { "type": "string" } },
+        "importance": { "enum": ["key","minor"] },
+        "importance_reason": { "type": "string" },
+        "boundary_state": { "enum": ["verified","refined","split","rejected_final","unreviewed"] },
+        "refine_reason": { "type": ["object","string","null"] },
+        "dedup_id": { "type": ["string","null"] },
+        "dedup_source_ids": { "type": "array", "items": { "type": "string" } },
+        "modality": { "type": "array", "items": { "enum": ["visual","audio","speech"] } },
+        "scene_alignment": { "type": ["number","null"] }
       }
     },
     "DescSegment": {
@@ -128,7 +170,20 @@
       "properties": {
         "start": { "type": "number" },
         "end": { "type": "number" },
-        "description": { "$ref": "#/$defs/LangText" }
+        "description": { "$ref": "#/$defs/LangText" },
+        "elements": { "type": "object" }
+      }
+    },
+    "AudioEvent": {
+      "type": "object",
+      "required": ["start", "end", "type"],
+      "properties": {
+        "start": { "type": "number" },
+        "end": { "type": "number" },
+        "type": { "enum": ["music","sfx","applause","noise","other"] },
+        "desc": { "$ref": "#/$defs/LangText" },
+        "lang": { "type": ["string","null"] },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
       }
     },
     "Subtitle": {
@@ -138,7 +193,7 @@
         "start": { "type": "number" },
         "end": { "type": "number" },
         "text": { "type": "string" },
-        "lang": { "enum": ["zh","en"] },
+        "lang": { "type": ["string","null"] },
         "speaker": { "type": ["string","null"] }
       }
     },
@@ -149,7 +204,8 @@
         "start": { "type": "number" },
         "end": { "type": "number" },
         "text": { "type": "string" },
-        "bbox": { "type": ["array","null"], "items": { "type": "number" } }
+        "bbox": { "type": ["array","null"], "items": { "type": "number" } },
+        "confidence": { "type": ["number","null"] }
       }
     },
     "Character": {
@@ -159,7 +215,10 @@
         "id": { "type": "string" },
         "name": { "$ref": "#/$defs/LangText" },
         "role": { "$ref": "#/$defs/LangText" },
-        "description": { "$ref": "#/$defs/LangText" }
+        "description": { "$ref": "#/$defs/LangText" },
+        "first_seen_ts": { "type": ["number","null"] },
+        "total_screen_time": { "type": "number" },
+        "appearance_count": { "type": "integer" }
       }
     },
     "Relation": {
@@ -170,6 +229,56 @@
         "dst": { "type": "string" },
         "type": { "$ref": "#/$defs/LangText" },
         "directed": { "type": "boolean", "default": true }
+      }
+    },
+    "Theme": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "$ref": "#/$defs/LangText" },
+        "evidence_event_ids": { "type": "array", "items": { "type": "string" } },
+        "desc": { "$ref": "#/$defs/LangText" }
+      }
+    },
+    "TurningPoint": {
+      "type": "object",
+      "required": ["span", "type", "desc"],
+      "properties": {
+        "span": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+        "type": { "type": "string" },
+        "desc": { "$ref": "#/$defs/LangText" },
+        "importance": { "enum": ["high","medium","low"] }
+      }
+    },
+    "Motif": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "$ref": "#/$defs/LangText" },
+        "clue_spans": { "type": "array", "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 } },
+        "desc": { "$ref": "#/$defs/LangText" }
+      }
+    },
+    "Gap": {
+      "type": "object",
+      "required": ["start", "end"],
+      "properties": {
+        "start": { "type": "number" },
+        "end": { "type": "number" },
+        "reason": { "type": "string" }
+      }
+    },
+    "HumanTodo": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "type": "string" },
+        "event_id": { "type": "string" },
+        "span": { "type": ["array","null"], "items": { "type": "number" } },
+        "start": { "type": "number" },
+        "end": { "type": "number" },
+        "reason": { "type": "string" },
+        "created_date": { "type": "string" }
       }
     },
     "QAItem": {
@@ -195,6 +304,8 @@
         "video_lang": { "enum": ["zh","en"] },
         "question_lang": { "enum": ["zh","en"] },
         "question": { "$ref": "#/$defs/LangText" },
+        "referring_ctx": { "$ref": "#/$defs/LangText" },
+        "clue_duration": { "type": "number" },
         "options": {
           "type": "array",
           "items": {
@@ -218,6 +329,7 @@
         "evidence_modality": { "type": "array", "items": { "enum": ["visual","subtitle","audio","ocr"] } },
         "min_watch": { "enum": ["single_scene","cross_scene","whole_video"] },
         "difficulty": { "enum": ["easy","medium","hard"] },
+        "anchor_id": { "type": "string" },
         "anti_shortcut": {
           "type": "object",
           "required": ["blind_llm_pass", "single_frame_pass", "subtitle_only_pass"],
@@ -225,10 +337,36 @@
             "blind_llm_pass": { "type": "boolean" },
             "single_frame_pass": { "type": "boolean" },
             "subtitle_only_pass": { "type": "boolean" },
+            "synopsis_pass": { "type": "boolean" },
+            "language_prior_pass": { "type": "boolean" },
+            "subtitle_locate_pass": { "type": "boolean" },
+            "blind_similar_pass": { "type": "boolean" },
             "checked_by": { "type": ["string","null"] },
-            "checked_date": { "type": ["string","null"], "format": "date" }
+            "checked_date": { "type": ["string","null"], "format": "date" },
+            "checked_note": { "type": "array", "items": { "type": "string" } }
           }
         },
+        "verification": {
+          "type": "object",
+          "properties": {
+            "provider": { "type": ["string","null"] },
+            "agreement": { "type": ["boolean","null"] },
+            "pass": { "type": ["boolean","null"] },
+            "verifier": { "type": ["string","null"] },
+            "confidence": { "type": ["number","null"] },
+            "miou": { "type": ["number","null"] },
+            "verifier_interval": {
+              "type": ["array","null"],
+              "items": { "type": "number" },
+              "minItems": 2,
+              "maxItems": 2
+            },
+            "self_check": { "type": "boolean" },
+            "reason": { "type": "string" }
+          }
+        },
+        "quality_flags": { "type": "array", "items": { "type": "string" } },
+        "cross_check": { "type": "object" },
         "is_gold": { "type": "boolean", "default": false },
         "split": { "enum": ["dev","test"] },
         "provenance": { "enum": ["human","llm_assisted"] },

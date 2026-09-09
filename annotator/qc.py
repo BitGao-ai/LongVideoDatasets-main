@@ -30,7 +30,9 @@ def krippendorff_alpha(units: Sequence[Sequence[Optional[object]]],
     idx = {v: i for i, v in enumerate(values)}
     V = len(values)
     if V < 2:
-        return 1.0  # 只有一种取值,视为完全一致
+        # 所有验证者都给了同一个标签:观察分歧与期望分歧同时为 0,α 在数学上
+        # 未定义。此前返回 1.0,会让"全部人都选 A"这种退化样本轻松通过门禁。
+        return float("nan")
 
     # 重合矩阵 o[c][k]
     o = [[0.0] * V for _ in range(V)]
@@ -91,12 +93,13 @@ def grade_gold(responses: List[Dict], gold_key: Dict[str, str],
     返回 {annotator: {correct,total,accuracy,flag}};flag=True 表示 < 阈值需复训。
     """
     tally: Dict[str, List[int]] = defaultdict(lambda: [0, 0])  # [correct, total]
-    for r in responses:
-        qid = r["qid"]
-        if qid in gold_key:
-            tally[r["annotator"]][1] += 1
+    for r in responses or []:
+        qid = (r or {}).get("qid")
+        annotator = r.get("annotator") if r else None
+        if qid in gold_key and annotator:
+            tally[annotator][1] += 1
             if r.get("answer") == gold_key[qid]:
-                tally[r["annotator"]][0] += 1
+                tally[annotator][0] += 1
     out = {}
     for ann, (c, t) in tally.items():
         acc = c / t if t else float("nan")
@@ -114,9 +117,10 @@ def rework_candidates(responses: List[Dict], answer_key: Dict[str, str]) -> List
     answer_key: {qid: 出题者标注的正确答案}(来自标注文件 q["answer"])。
     """
     by_q: Dict[str, List[str]] = defaultdict(list)
-    for r in responses:
-        if r["qid"] in answer_key and r.get("answer") is not None:
-            by_q[r["qid"]].append(r["answer"])
+    for r in responses or []:
+        qid = (r or {}).get("qid")
+        if qid in answer_key and r.get("answer") is not None:
+            by_q[qid].append(r["answer"])
     flagged = []
     for qid, ans in by_q.items():
         gold = answer_key[qid]
@@ -149,9 +153,10 @@ def run_qc(annotations: List[Dict], responses: List[Dict],
 
     # 一致性:按题聚合验证者答案(排除黄金题,避免难度偏置)
     per_q: Dict[str, List[str]] = defaultdict(list)
-    for r in responses:
-        if r["qid"] in answer_key and r["qid"] not in gold_key and r.get("answer"):
-            per_q[r["qid"]].append(r["answer"])
+    for r in responses or []:
+        qid = (r or {}).get("qid")
+        if qid in answer_key and qid not in gold_key and r.get("answer"):
+            per_q[qid].append(r["answer"])
     units = [v for v in per_q.values() if len(v) >= 2]
     alpha = krippendorff_alpha(units, level=level) if units else float("nan")
 
