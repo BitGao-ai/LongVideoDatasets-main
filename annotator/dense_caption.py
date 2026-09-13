@@ -212,9 +212,10 @@ def _native_segment(client: LLMClient, cfg: RunConfig, store: FrameStore, ws: fl
                     meta: Dict) -> Optional[Dict]:
     """native_video 模式片段详述(仅 Qwen;复用 describe.py 的切片能力)。"""
     from . import native_video
+    from .config import get_api_key
     import os
     import tempfile
-    api_key = os.environ.get(client.pc.api_key_env)
+    api_key = get_api_key(client.pc.api_key_env)
     clipdir = cfg.native_clip_dir or tempfile.gettempdir()
     os.makedirs(clipdir, exist_ok=True)
     clip = os.path.join(clipdir, f"clip_{meta.get('video_id', 'v')}_{int(ws)}_{int(we)}.mp4")

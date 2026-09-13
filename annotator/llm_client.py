@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from openai import OpenAI
 
-from .config import LOCAL_PROVIDER_NAME, RunConfig
+from .config import LOCAL_PROVIDER_NAME, RunConfig, get_api_key
 from .utils import quiet_http_loggers, sha256_of
 
 log = logging.getLogger("annotator.llm")
@@ -111,13 +111,16 @@ class LLMClient:
         self.cfg = cfg
         self.pc = cfg.provider_cfg()
         self.is_local = (self.pc.name == LOCAL_PROVIDER_NAME)
-        key = os.environ.get(self.pc.api_key_env, "").strip() if self.pc.api_key_env else ""
+        # 配置通用且独立:统一走 config.get_api_key(),优先级 环境变量 > 内置默认值 > .env
+        # 最小范围修改:仅替换 key 获取逻辑,不改动重试/trace 等其它高内聚逻辑
+        key = get_api_key(self.pc.api_key_env) if self.pc.api_key_env else ""
         if not key:
             if self.is_local:
                 key = cfg.local_api_key or "EMPTY"   # 本地端点(vLLM 等)免 key
             else:
                 raise RuntimeError(
-                    f"缺少 API Key:请设置环境变量 {self.pc.api_key_env}(provider={self.pc.name})"
+                    f"缺少 API Key:请设置环境变量 {self.pc.api_key_env}(provider={self.pc.name}) "
+                    f"或在 .env / config.py DEFAULT_API_KEYS 中配置"
                 )
         self.client = OpenAI(api_key=key, base_url=self.pc.base_url, timeout=cfg.request_timeout)
         quiet_http_loggers()

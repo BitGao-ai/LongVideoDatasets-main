@@ -161,10 +161,10 @@ def main():
     p.add_argument("--structure", default="", help="单视频模式:预处理结构 JSON(preprocess.py 产出)")
     p.add_argument("--out", default="", help="单视频模式:标注结果输出路径")
     p.add_argument("--schema", default="schema/annotation.schema.json", help="校验用 schema")
-    p.add_argument("--provider", default="qwen", choices=["qwen", "kimi", "local"],
-                    help="标注供应商;local=本地 vLLM/SGLang 端点(须配 --local-base-url/--local-model)")
-    p.add_argument("--verify-provider", default="", choices=["qwen", "kimi", "local"],
-                    help="答案核验/复筛用另一家供应商(空=自动选;provider=local 时自动用本地模型)")
+    p.add_argument("--provider", default="qwen", choices=["qwen", "kimi", "local", "maas", "qwen-maas", "workspace"],
+                     help="标注供应商;local=本地 vLLM/SGLang 端点(须配 --local-base-url/--local-model), maas/workspace/qwen-maas 为企业版私有端点")
+    p.add_argument("--verify-provider", default="", choices=["qwen", "kimi", "local", "maas", "qwen-maas", "workspace"],
+                     help="答案核验/复筛用另一家供应商(空=自动选;provider=local 时自动用本地模型)")
     p.add_argument("--window-sec", type=float, default=180.0)
     p.add_argument("--frames", type=int, default=10, help="每窗口采样帧数(场景标注)")
     p.add_argument("--qa", type=int, default=0,

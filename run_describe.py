@@ -79,8 +79,8 @@ def main():
     p = argparse.ArgumentParser(description="给已标注文件补全全片详细描述(v2)")
     p.add_argument("--in", dest="inp", required=True, help="标注文件目录或 glob")
     p.add_argument("--out-dir", required=True)
-    p.add_argument("--provider", default="qwen", choices=["qwen", "kimi", "local"],
-                    help="标注供应商;local=本地端点(须配 --local-base-url/--local-model)")
+    p.add_argument("--provider", default="qwen", choices=["qwen", "kimi", "local", "maas", "qwen-maas", "workspace"],
+                     help="标注供应商;local=本地端点(须配 --local-base-url/--local-model), maas/workspace/qwen-maas 为企业版私有端点")
     p.add_argument("--local-base-url", default="", help="本地模型端点(vLLM),provider=local 时使用")
     p.add_argument("--local-model", default="", help="本地视觉模型名(如 Qwen/Qwen3-VL-8B-Instruct)")
     p.add_argument("--describe-mode", default="frames", choices=["frames", "native_video"],

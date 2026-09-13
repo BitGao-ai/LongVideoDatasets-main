@@ -71,8 +71,8 @@ def main():
                    help="只出报告,不把门禁判定(review_status)回写标注文件")
     p.add_argument("--embedding", action="store_true",
                    help="open/summary 一致率用供应商 embedding(默认 ROUGE-L 纯标准库)")
-    p.add_argument("--provider", default="qwen", choices=["qwen", "kimi", "local"],
-                    help="embedding 用供应商;local 时需配 --local-base-url/--local-model(本地无 embedding 服务,将自动回退 ROUGE-L)")
+    p.add_argument("--provider", default="qwen", choices=["qwen", "kimi", "local", "maas", "qwen-maas", "workspace"],
+                     help="embedding 用供应商;local 时需配 --local-base-url/--local-model(本地无 embedding 服务,将自动回退 ROUGE-L)")
     p.add_argument("--local-base-url", default="", help="本地模型端点(vLLM),provider=local 时使用")
     p.add_argument("--local-model", default="", help="本地视觉模型名(如 Qwen/Qwen3-VL-8B-Instruct)")
     args = p.parse_args()

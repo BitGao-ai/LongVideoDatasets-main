@@ -11,7 +11,96 @@
 
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
+
+# ---------------------------------------------------------------- 内置默认密钥
+# 来源: /Users/bityangzi/python/lingxi/默认业务空间-apiKey-6375308.xlsx
+#   - tokenplan sheet (A1): sk-sp-... 为百炼 Token Plan 公共端点密钥
+#   - 默认业务空间 sheet: sk-ws-... 为企业版 MaaS 私有端点密钥
+# 优先级: 环境变量 > 内置默认值 > .env 文件(见下方 _load_dotenv)
+# 这样 clone 后不配置环境变量也能直接跑;线上/CI 通过环境变量覆盖即可。
+DEFAULT_DASHSCOPE_API_KEY = "sk-sp-H.YPEML.ugTC.MEUCIBiqFI-s5pSQCK87NMBeuXP936Rp1NMWUhgQ3Md8qmk1AiEAsxwK5Un2x1IwY_hHXoT_zweTPmqZ90IAQHOZ3CLV-Fo"
+DEFAULT_WORKSPACE_API_KEY = "sk-ws-H.EIPRIMY.gNWQ.MEUCIQDUpIXzjdRdGjY3OMADt7XI-Gy86ZYi25A0rTM6IcHV1AIgEwe9qWBdZQB2rEmzV5G_QPGPr4kDpWL94YO_qvVoyZ4"
+DEFAULT_WORKSPACE_BASE_URL = "https://llm-7dfb5cb9gwefuqdz.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+DEFAULT_WORKSPACE_ID = "llm-7dfb5cb9gwefuqdz"
+DEFAULT_OPENAI_COMPATIBLE_URL = DEFAULT_WORKSPACE_BASE_URL  # 别名,见 Excel 描述
+
+# 环境变量 -> 默认值的映射,供 LLMClient fallback
+DEFAULT_API_KEYS: Dict[str, str] = {
+    "DASHSCOPE_API_KEY": DEFAULT_DASHSCOPE_API_KEY,
+    "MAAS_API_KEY": DEFAULT_WORKSPACE_API_KEY,
+    "MOONSHOT_API_KEY": "",  # 未提供,可按需在 .env 中配置
+}
+
+# Workspace 额外信息(仅作文档/调试用,不直接参与鉴权)
+WORKSPACE_INFO = {
+    "workspace_name": "默认业务空间",
+    "workspace_id": DEFAULT_WORKSPACE_ID,
+    "apiHost": "llm-7dfb5cb9gwefuqdz.cn-beijing.maas.aliyuncs.com",
+    "dashScope": "https://llm-7dfb5cb9gwefuqdz.cn-beijing.maas.aliyuncs.com/api/v1",
+}
+
+
+def _load_dotenv(dotenv_path: str = ".env") -> None:
+    """极简 .env 加载器(不依赖 python-dotenv)。
+
+    仅在环境变量缺失时注入,已有的环境变量优先级更高,符合 12-Factor。
+    """
+    if os.path.exists(dotenv_path):
+        try:
+            with open(dotenv_path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k, v = k.strip(), v.strip().strip('"').strip("'")
+                    if k and v and k not in os.environ:
+                        os.environ[k] = v
+        except Exception:
+            pass
+    # 也尝试从项目根目录加载(当 annotator 作为包被导入时 CWD 可能不同)
+    try:
+        import pathlib
+        root_env = pathlib.Path(__file__).resolve().parents[1] / ".env"
+        if str(root_env) != dotenv_path and root_env.exists():
+            with open(root_env, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k, v = k.strip(), v.strip().strip('"').strip("'")
+                    if k and v and k not in os.environ:
+                        os.environ[k] = v
+    except Exception:
+        pass
+
+
+# 模块导入时自动尝试加载 .env(失败静默,不影响无 .env 环境)
+_load_dotenv()
+
+
+def get_api_key(env_name: str) -> str:
+    """按优先级返回 API Key: 环境变量 > 内置默认值 > 空字符串。
+
+    - 高内聚:所有 key 解析收口于此,调用方无需散落 os.environ.get
+    - 支持 MAAS_API_KEY 未配置时复用 DASHSCOPE_API_KEY(兼容历史配置)
+    """
+    if not env_name:
+        return ""
+    val = os.environ.get(env_name, "").strip()
+    if val:
+        return val
+    # maas 家族允许复用 DASHSCOPE_API_KEY 中的 ws 密钥
+    if env_name == "MAAS_API_KEY":
+        alt = os.environ.get("DASHSCOPE_API_KEY", "").strip()
+        if alt.startswith("sk-ws-"):
+            return alt
+        # 也尝试从内置默认值兜底
+        if DEFAULT_WORKSPACE_API_KEY:
+            return DEFAULT_WORKSPACE_API_KEY
+    return DEFAULT_API_KEYS.get(env_name, "").strip()
 
 
 @dataclass
@@ -24,7 +113,8 @@ class ProviderConfig:
 
 
 PROVIDERS = {
-    # 阿里云 DashScope(百炼)——OpenAI 兼容模式
+    # 阿里云 DashScope(百炼)——OpenAI 兼容模式(公共端点)
+    # 默认 key 来源: Excel tokenplan sheet (sk-sp-...)
     "qwen": ProviderConfig(
         name="qwen",
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -40,7 +130,56 @@ PROVIDERS = {
         vision_model="moonshot-v1-32k-vision-preview",  # 备选: kimi-latest
         text_model="moonshot-v1-32k",
     ),
+    # 企业版 MaaS 私有端点(默认业务空间)
+    # 默认 key 来源: Excel 默认业务空间 sheet (sk-ws-...)
+    # base_url: https://llm-7dfb5cb9gwefuqdz.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+    "maas": ProviderConfig(
+        name="maas",
+        base_url=DEFAULT_WORKSPACE_BASE_URL,
+        api_key_env="MAAS_API_KEY",
+        vision_model="qwen-vl-max",
+        text_model="qwen-plus",
+    ),
+    # 别名: qwen-maas / workspace 均指向同一私有端点,兼容不同文档命名
+    "qwen-maas": ProviderConfig(
+        name="qwen-maas",
+        base_url=DEFAULT_WORKSPACE_BASE_URL,
+        api_key_env="DASHSCOPE_API_KEY",  # 允许复用 DASHSCOPE_API_KEY 注入 sk-ws-*
+        vision_model="qwen-vl-max",
+        text_model="qwen-plus",
+    ),
+    "workspace": ProviderConfig(
+        name="workspace",
+        base_url=DEFAULT_WORKSPACE_BASE_URL,
+        api_key_env="MAAS_API_KEY",
+        vision_model="qwen-vl-max",
+        text_model="qwen-plus",
+    ),
 }
+
+def resolve_base_url(provider_name: str, api_key: str = "") -> str:
+    """根据 provider 与 key 前缀智能选择 base_url(独立、通用)。
+
+    - maas/workspace/qwen-maas 固定返回私有端点(优先 MAAS_BASE_URL 覆盖)
+    - qwen 若传入 sk-ws-* 前缀的 key 自动切换到私有端点(兼容用户把 ws 密钥配到 DASHSCOPE_API_KEY)
+      此时优先使用 MAAS_BASE_URL / 私有端点,而非 DASHSCOPE_BASE_URL
+    - 支持通过环境变量显式覆盖: DASHSCOPE_BASE_URL (仅 qwen) / MAAS_BASE_URL (私有端点族)
+    - 否则返回 PROVIDERS 中配置的默认 base_url
+    """
+    # 私有端点族固定走 MAAS 私有端点, 不受 DASHSCOPE_BASE_URL 影响
+    if provider_name in ("maas", "workspace", "qwen-maas"):
+        return os.environ.get("MAAS_BASE_URL", "").strip() or DEFAULT_WORKSPACE_BASE_URL
+    # qwen + ws 前缀自动切换到私有端点(高内聚:配置层统一处理,调用方无需手动选 maas)
+    if provider_name == "qwen" and api_key.strip().startswith("sk-ws-"):
+        return os.environ.get("MAAS_BASE_URL", "").strip() or DEFAULT_WORKSPACE_BASE_URL
+    # 通用覆盖:仅对 qwen 生效,方便更换模型/端点(配置通用且独立)
+    if provider_name == "qwen":
+        env_override = os.environ.get("DASHSCOPE_BASE_URL", "").strip()
+        if env_override:
+            return env_override
+    pc = PROVIDERS.get(provider_name)
+    return pc.base_url if pc else DEFAULT_WORKSPACE_BASE_URL
+
 
 # 本地部署模型(vLLM / SGLang / Ollama,OpenAI 兼容端点)。
 LOCAL_PROVIDER_NAME = "local"
@@ -156,12 +295,31 @@ class RunConfig:
             text_model=self.local_vision_model,
         )
 
+    def _resolve_provider(self, name: str) -> ProviderConfig:
+        """通用解析:返回 ProviderConfig,如需则按 key 前缀/环境变量动态覆盖 base_url。
+
+        高内聚:所有 provider 的 base_url 动态逻辑收口于此,调用方无需关心端点细节。
+        低耦合:不修改全局 PROVIDERS,返回副本仅影响本次调用。
+        """
+        pc = PROVIDERS[name]
+        api_key = get_api_key(pc.api_key_env)
+        resolved_url = resolve_base_url(pc.name, api_key)
+        if resolved_url != pc.base_url:
+            return ProviderConfig(
+                name=pc.name,
+                base_url=resolved_url,
+                api_key_env=pc.api_key_env,
+                vision_model=pc.vision_model,
+                text_model=pc.text_model,
+            )
+        return pc
+
     def provider_cfg(self) -> ProviderConfig:
         if self.provider == LOCAL_PROVIDER_NAME:
             return self._local_provider_cfg()
         if self.provider not in PROVIDERS:
             raise ValueError(f"未知 provider: {self.provider};可选 {list(PROVIDERS)}+{LOCAL_PROVIDER_NAME}")
-        return PROVIDERS[self.provider]
+        return self._resolve_provider(self.provider)
 
     def verify_provider_cfg(self) -> Optional[ProviderConfig]:
         if self.verify_provider:
@@ -173,12 +331,12 @@ class RunConfig:
                 return self._local_provider_cfg()
             if self.verify_provider == self.provider:
                 raise ValueError("verify_provider 必须与 provider 不同(否则无交叉核验意义)")
-            return PROVIDERS[self.verify_provider]
+            return self._resolve_provider(self.verify_provider)
         if self.provider == LOCAL_PROVIDER_NAME:
             return self._local_provider_cfg()
-        for name, pc in PROVIDERS.items():
+        for name in PROVIDERS:
             if name != self.provider:
-                return pc
+                return self._resolve_provider(name)
         return None
 
     def qa_quota(self, duration_sec: float) -> int:

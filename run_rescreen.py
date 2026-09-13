@@ -39,8 +39,8 @@ def main():
     p = argparse.ArgumentParser(description="换模型复筛(cross-model re-screening)")
     p.add_argument("--in", dest="inp", required=True, help="标注文件目录或 glob")
     p.add_argument("--out-dir", required=True, help="复筛后输出目录")
-    p.add_argument("--provider", required=True, choices=["qwen", "kimi", "local"],
-                    help="复筛用供应商(须不同于初标;local 须配 --local-base-url/--local-model)")
+    p.add_argument("--provider", required=True, choices=["qwen", "kimi", "local", "maas", "qwen-maas", "workspace"],
+                     help="复筛用供应商(须不同于初标;local 须配 --local-base-url/--local-model)")
     p.add_argument("--report", default="", help="汇总报告 JSON 路径(可选)")
     p.add_argument("--keep-shortcut", action="store_true", help="只标记不剔除")
     p.add_argument("--frame-rate", type=float, default=1.0, help="帧索引抽帧率")
