@@ -44,6 +44,7 @@ import json
 import logging
 import os
 import sys
+import warnings
 from dataclasses import dataclass
 
 import cv2
@@ -58,6 +59,22 @@ from annotator.utils import quiet_http_loggers
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 quiet_http_loggers()
 log = logging.getLogger("preprocess")
+
+# whisperx 是懒加载：`import whisperx` 不引 pyannote，真触发是后面的
+# load_model -> vads/pyannote.py -> `from pyannote.audio import Model`。
+# 按文案过滤不可靠(message 是 re.match 且以换行开头)，按模块过滤，一行管住所有懒加载路径。
+warnings.filterwarnings("ignore", category=UserWarning, module=r"pyannote\.audio\.core\.io")
+
+
+def _tc_sec(tc: object) -> float:
+    """取 FrameTimecode 秒数：优先 .seconds(0.7+)，旧版回退 get_seconds()。"""
+    sec = getattr(tc, "seconds", None)
+    if sec is not None:
+        try:
+            return float(sec)
+        except (TypeError, ValueError):
+            pass
+    return float(tc.get_seconds())  # noqa: SLF001 —— 仅兼容 scenedetect<0.6
 
 
 @dataclass
@@ -98,17 +115,44 @@ def free_gpu(*objs) -> None:
         log.debug("跳过显存回收: %s", e)
 
 
-def detect_shots(video_path: str, cfg: Config, store: FrameStore) -> list:
+def detect_shots(video_path: str, cfg: Config, store: FrameStore,
+                 duration_sec: float = 0.0) -> list:
     from scenedetect import ContentDetector, detect
-    log.info("镜头分割中 ...")
-    scenes = detect(video_path, ContentDetector(threshold=cfg.scene_threshold))
+    log.info("镜头分割中 ...(threshold=%.1f)", cfg.scene_threshold)
+    # start_in_scene=True: 无切点时返回 1 个全片镜头而非 [](单机位口播/会议最常见)。
+    # 不传该参数时 detect() 默认返回 []，调用方会误以为“检出 0 个镜头”是正常结果。
+    scenes = detect(video_path, ContentDetector(threshold=cfg.scene_threshold),
+                    start_in_scene=True)
+    if not scenes:
+        # 双保险：极端情况下(如解码失败但未抛错)仍兜底为单镜头，避免下游 M1/M2 空跑。
+        dur = duration_sec or (store._duration if store is not None else 0.0)
+        if dur > 0:
+            log.warning("镜头分割 0 检出，已兜底为单镜头 [0, %.3f](阈值 %.1f 过高或单机位长镜头)。"
+                        "如需更细切分可降 --scene-threshold(如 20/15)重跑",
+                        dur, cfg.scene_threshold)
+            scenes = None  # 标记走兜底分支
+        else:
+            log.warning("镜头分割 0 检出且未知时长，返回空(下游可能空跑)")
+            return []
+    if scenes is None:
+        kf = store.shot_keyframe_times(0.0, dur) if store is not None else []
+        kf_paths = [os.path.join(store.frames_dir, f"f_{int(t):07d}_{int(round((t - int(t)) * 1000)):03d}.jpg")
+                    for t in kf] if store is not None else []
+        return [{
+            "id": 1,
+            "start": 0.0,
+            "end": round(dur, 3),
+            "desc": {"zh": None, "en": None},
+            "keyframe_path": kf_paths[1] if len(kf_paths) > 1 else (kf_paths[0] if kf_paths else None),
+            "keyframes": kf,
+        }]
     shots = []
     for i, (start, end) in enumerate(scenes, start=1):
-        s, e = round(start.get_seconds(), 3), round(end.get_seconds(), 3)
-        kf = store.shot_keyframe_times(s, e)
+        s, e = round(_tc_sec(start), 3), round(_tc_sec(end), 3)
+        kf = store.shot_keyframe_times(s, e) if store is not None else [s, (s + e) / 2.0, e]
         # 关键帧文件路径(frames 目录内,文件名即时间戳)
         kf_paths = [os.path.join(store.frames_dir, f"f_{int(t):07d}_{int(round((t - int(t)) * 1000)):03d}.jpg")
-                    for t in kf]
+                    for t in kf] if store is not None else []
         shots.append({
             "id": i,
             "start": s,
@@ -117,15 +161,29 @@ def detect_shots(video_path: str, cfg: Config, store: FrameStore) -> list:
             "keyframe_path": kf_paths[1] if kf_paths else None,
             "keyframes": kf,
         })
-    log.info("检出 %d 个镜头", len(shots))
+    # 单镜头长视频(如 15min 口播)明确提示，避免用户误以为阈值失效
+    if len(shots) == 1:
+        log.info("仅 1 个镜头(全片一镜，时长 %.1fs)：属正常(单机位/无硬切)。"
+                 "如需更细切分可降 --scene-threshold 重跑", shots[0]["end"] - shots[0]["start"])
+    else:
+        log.info("检出 %d 个镜头", len(shots))
     return shots
 
 
 def transcribe(video_path: str, lang: str, cfg: Config, hf_token) -> tuple:
     """WhisperX 转写。每个重模型用完立刻释放显存(C1),否则后续 OCR 会 OOM。"""
+    # torchcodec 缺共享 FFmpeg 库时的 UserWarning 已在顶层按模块压制(懒加载路径太多，
+    # 函数内 catch 包不住)。这里只保留一行 INFO，避免用户误以为转写卡死。
+    # 本阶段 ASR 走 whisperx.load_audio(ffmpeg/静态二进制)，不依赖 torchcodec；
+    # 只有传了 --hf-token 的说话人分离才需要它(失败已有 diarize_failed 兜底)。
     import whisperx
     log.info("WhisperX 转写中 (lang=%s, model=%s, device=%s, batch=%d) ...",
              lang, cfg.whisper_model, cfg.device, cfg.whisper_batch)
+    try:
+        import torchcodec  # noqa: F401 —— 仅做可用性探测，缺失不阻塞 ASR
+    except Exception:
+        log.info("torchcodec 不可用(多为 Mac 静态 ffmpeg 缺共享库)，ASR 不受影响；"
+                 "如需说话人分离请 `brew install ffmpeg` 后重装 torchcodec")
     audio = whisperx.load_audio(video_path)
 
     model = whisperx.load_model(cfg.whisper_model, cfg.device,
@@ -175,22 +233,76 @@ def run_ocr(video_path: str, cfg: Config, store=None) -> list:
     frames_store 声明要废除的做法。帧索引不可用时才回退顺序解码。
     """
     from paddleocr import PaddleOCR
-    ocr = PaddleOCR(use_angle_cls=True, lang=cfg.ocr_lang, show_log=False)
+    try:
+        # PaddleOCR 3.x:use_angle_cls/show_log 已移除,用 use_textline_orientation;
+        # predict() 返回含 rec_texts/rec_scores/rec_boxes 的结果对象(见下 _parse_v3)
+        ocr = PaddleOCR(lang=cfg.ocr_lang, use_textline_orientation=True)
+        _ocr_v3 = True
+    except TypeError:
+        # PaddleOCR 2.x 回退
+        ocr = PaddleOCR(use_angle_cls=True, lang=cfg.ocr_lang, show_log=False)
+        _ocr_v3 = False
 
     raw = []
 
+    def _iter_v2(res):
+        """2.x:ocr.ocr() -> [[bbox, (text, conf)], ...]"""
+        for line in (res[0] or []) if res else []:
+            try:
+                txt, conf = line[1][0], line[1][1]
+                bbox = line[0]
+            except (IndexError, TypeError, KeyError):
+                continue
+            yield txt, conf, bbox
+
+    def _iter_v3(out):
+        """3.x:predict() -> [OCRResult{rec_texts/rec_scores/rec_polys/rec_boxes}]"""
+        for r in out or []:
+            try:
+                if isinstance(r, dict) or hasattr(r, "get"):
+                    texts = r.get("rec_texts") or []
+                    scores = r.get("rec_scores") or []
+                    polys = r.get("rec_polys") or r.get("rec_boxes") or []
+                else:
+                    texts = getattr(r, "rec_texts", []) or []
+                    scores = getattr(r, "rec_scores", []) or []
+                    polys = getattr(r, "rec_polys", None)
+                    if polys is None:
+                        polys = getattr(r, "rec_boxes", []) or []
+                for i, txt in enumerate(texts):
+                    conf = float(scores[i]) if i < len(scores) else 0.0
+                    box = polys[i] if i < len(polys) else None
+                    yield txt, conf, box
+            except Exception:
+                continue
+
     def _collect(frame, t: float) -> None:
         try:
-            res = ocr.ocr(frame, cls=True)
+            if _ocr_v3:
+                res = ocr.predict(frame)
+                items = _iter_v3(res)
+            else:
+                res = ocr.ocr(frame, cls=True)
+                items = _iter_v2(res)
         except Exception as e:
             log.warning("第 %.1fs OCR 失败: %s", t, e)
             return
-        for line in (res[0] or []) if res else []:
-            txt, conf = line[1][0], line[1][1]
-            if conf >= cfg.ocr_min_conf and txt.strip():
-                bbox = line[0]
+        for txt, conf, bbox in items:
+            try:
+                conf = float(conf)
+            except (TypeError, ValueError):
+                continue
+            if conf >= cfg.ocr_min_conf and (txt or "").strip():
+                try:
+                    import numpy as _np
+                    if isinstance(bbox, _np.ndarray):
+                        bbox = bbox.tolist()
+                    flat = [round(float(v), 1) for pt in (bbox or []) for v in
+                            (pt if isinstance(pt, (list, tuple)) else [pt])]
+                except Exception:
+                    flat = []
                 raw.append({"t": round(t, 3), "text": txt.strip(), "conf": conf,
-                            "bbox": [round(float(v), 1) for pt in bbox for v in pt]})
+                            "bbox": flat})
 
     frame_times = store.index_times() if store is not None else []
     if frame_times:
@@ -264,7 +376,8 @@ def preprocess_video(video: str, video_id: str, lang: str, out: str, cfg: Config
     store = None
     if not skip_frames:
         try:
-            store = FrameStore(frames_dir, fps=cfg.frame_rate, max_edge=768)
+            store = FrameStore(frames_dir, fps=cfg.frame_rate, max_edge=768,
+                               video_id=video_id)
             store.set_duration(duration)
             store.build(video)
             store.verify_index(duration)
@@ -275,8 +388,8 @@ def preprocess_video(video: str, video_id: str, lang: str, out: str, cfg: Config
     structure = {"shots": [], "scenes": [], "events": [], "subtitles": [], "ocr": [],
                  "audio_events": []}
 
-    for name, fn in (("镜头分割", lambda: detect_shots(video, cfg, store)
-                      if store else _detect_shots_no_store(video, cfg)),
+    for name, fn in (("镜头分割", lambda: detect_shots(video, cfg, store, duration)
+                      if store else _detect_shots_no_store(video, cfg, duration)),
                      ("ASR", lambda: transcribe(video, lang, cfg, hf_token))):
         try:
             if name == "镜头分割":
@@ -348,9 +461,9 @@ def main():
     g.add_argument("--compute-type", default="",
                    help="WhisperX 计算精度(默认 cuda→float16 / cpu→int8;显存不足可用 int8_float16)")
     g.add_argument("--whisper-model", default="large-v3",
-                   help="WhisperX 模型(显存不足可降到 medium / small)")
-    g.add_argument("--whisper-batch", type=int, default=16,
-                   help="WhisperX batch_size,显存峰值主因(默认 16;16GB 卡建议 ≤8)")
+                   help="WhisperX 模型(默认 large-v3；CPU/Mac 建议 small/medium，首次需下载数 GB)")
+    g.add_argument("--whisper-batch", type=int, default=None,
+                   help="WhisperX batch_size(默认 cuda=16/cpu=4；CPU 上 >8 极慢且易 OOM)")
     g.add_argument("--scene-threshold", type=float, default=27.0, help="镜头分割敏感度")
     g.add_argument("--ocr-lang", default="ch", help="PaddleOCR 语言(ch=中英,en=纯英)")
     g.add_argument("--ocr-interval-sec", type=float, default=2.0, help="OCR 采样间隔(秒)")
@@ -361,14 +474,29 @@ def main():
     hf_token = args.hf_token or os.environ.get("HF_TOKEN", "")
 
     compute_type = args.compute_type or ("float16" if args.device == "cuda" else "int8")
+    if args.device == "cpu" and compute_type == "float16":
+        p.error("--device cpu 不支持 --compute-type float16，请用 int8(默认)或 int8_float16")
+    # CPU 默认 batch 从 16 降到 4：large-v3+batch16 在 Mac CPU 上又慢又吃内存，
+    # 是本次“卡在 tokenizer.json 后无响应”体感的第二主因(第一是数 GB 模型下载)。
+    whisper_batch = args.whisper_batch
+    if whisper_batch is None:
+        whisper_batch = 16 if args.device == "cuda" else 4
+    elif args.device == "cpu" and whisper_batch > 8:
+        log.warning("CPU 上 batch=%d 过大(建议 ≤4)，转写会显著变慢，已继续但请预期数小时",
+                    whisper_batch)
     cfg = Config(frame_rate=args.frame_rate, device=args.device,
                  compute_type=compute_type, whisper_model=args.whisper_model,
-                 whisper_batch=args.whisper_batch, scene_threshold=args.scene_threshold,
+                 whisper_batch=whisper_batch, scene_threshold=args.scene_threshold,
                  ocr_lang=args.ocr_lang, ocr_interval_sec=args.ocr_interval_sec,
                  ocr_min_conf=args.ocr_min_conf)
     log.info("计算配置: device=%s compute_type=%s whisper=%s batch=%d frame_rate=%.2f",
              cfg.device, cfg.compute_type, cfg.whisper_model, cfg.whisper_batch,
              cfg.frame_rate)
+    if args.device == "cpu" and cfg.whisper_model.startswith("large"):
+        log.warning("CPU 跑 %s：首次需下载 ~3GB(出现 .incomplete 属断点续传，未卡死)；"
+                    "15min 视频 CPU 转写约需 1~3h。着急请改 --whisper-model small/medium "
+                    "+ --whisper-batch 4，或先 --skip-ocr 验证链路",
+                    cfg.whisper_model)
 
     if args.video:
         video_id = args.video_id or os.path.splitext(os.path.basename(args.video))[0]
@@ -417,13 +545,33 @@ def main():
     log.info("批次全部完成,共 %d 部;产物见 %s/", len(tasks), os.path.abspath(args.structure_dir))
 
 
-def _detect_shots_no_store(video_path: str, cfg: Config) -> list:
+def _detect_shots_no_store(video_path: str, cfg: Config, duration_sec: float = 0.0) -> list:
     """无帧索引时的镜头分割兜底(仅 id/start/end,keyframe 置 None)。"""
     from scenedetect import ContentDetector, detect
-    scenes = detect(video_path, ContentDetector(threshold=cfg.scene_threshold))
-    return [{"id": i, "start": round(s.get_seconds(), 3), "end": round(e.get_seconds(), 3),
-             "desc": {"zh": None, "en": None}, "keyframe_path": None, "keyframes": []}
-            for i, (s, e) in enumerate(scenes, start=1)]
+    scenes = detect(video_path, ContentDetector(threshold=cfg.scene_threshold),
+                    start_in_scene=True)
+    if scenes:
+        return [{"id": i, "start": round(_tc_sec(s), 3), "end": round(_tc_sec(e), 3),
+                 "desc": {"zh": None, "en": None}, "keyframe_path": None, "keyframes": []}
+                for i, (s, e) in enumerate(scenes, start=1)]
+    if duration_sec <= 0:
+        # 最后尝试从视频头读时长，保证单镜头兜底可用
+        try:
+            import cv2 as _cv2
+            _cap = _cv2.VideoCapture(video_path)
+            if _cap.isOpened():
+                _fps = _cap.get(_cv2.CAP_PROP_FPS) or 25.0
+                _n = _cap.get(_cv2.CAP_PROP_FRAME_COUNT)
+                if _n and _fps:
+                    duration_sec = _n / _fps
+                _cap.release()
+        except Exception:
+            pass
+    if duration_sec > 0:
+        log.warning("镜头分割 0 检出(--skip-frames 路径)，已兜底为单镜头")
+        return [{"id": 1, "start": 0.0, "end": round(duration_sec, 3),
+                 "desc": {"zh": None, "en": None}, "keyframe_path": None, "keyframes": []}]
+    return []
 
 
 if __name__ == "__main__":

@@ -193,6 +193,20 @@ def pipeline_temporal_ratio(qa: List[Dict], threshold: float = 0.5) -> float:
 # =========================================================================
 # 视频级发布门禁(Res 8.2 门槛清单)
 # =========================================================================
+def _density_min(cfg: RunConfig, annotation: Dict) -> Tuple[float, str]:
+    """按题材解析事件密度门(P2-b)。
+
+    查表键 = annotation.meta.genre(schema 受控枚举);未覆写的题材回退
+    cfg.event_density_min。返回 (threshold, 说明串),门禁理由需要标明用了
+    哪条阈值,避免查表静默改变判定标准。
+    """
+    genre = (annotation.get("meta") or {}).get("genre") or "unknown"
+    over = (cfg.event_density_by_genre or {}).get(genre)
+    if over is None:
+        return cfg.event_density_min, f"{cfg.event_density_min:.0f}/h"
+    return float(over), f"{float(over):.0f}/h(genre={genre} 覆写)"
+
+
 def check_video_gates(annotation: Dict, meta_: Optional[Dict] = None,
                       alpha: float = float("nan"),
                       miou_pass_ratio: Optional[float] = None,
@@ -215,14 +229,15 @@ def check_video_gates(annotation: Dict, meta_: Optional[Dict] = None,
     if not gates["coverage"]:
         reasons.append(f"存在未覆盖区间 gaps: {len(gaps)} 个(含失败窗口)")
 
-    # 2) 事件密度 ≥45/h + key 事件 100% 有效 span
+    # 2) 事件密度 ≥45/h(或题材覆写值)+ key 事件 100% 有效 span
     dur = float((annotation.get("meta") or {}).get("duration_sec", 0) or 0)
     events = annotation.get("structure", {}).get("events") or []
     hours = max(dur / 3600.0, 1e-6)
     density = len(events) / hours
-    gates["event_density"] = density >= cfg.event_density_min
+    density_min, density_note = _density_min(cfg, annotation)
+    gates["event_density"] = density >= density_min
     if not gates["event_density"]:
-        reasons.append(f"事件密度 {density:.1f}/h < {cfg.event_density_min}/h")
+        reasons.append(f"事件密度 {density:.1f}/h < {density_note}")
     key_events = [e for e in events if e.get("importance") == "key"]
     bad_key = [e for e in key_events
                if not e.get("span") or len(e["span"]) != 2

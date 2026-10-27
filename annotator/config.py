@@ -13,17 +13,15 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-# ---------------------------------------------------------------- 内置默认密钥
-# 来源: /Users/bityangzi/python/lingxi/默认业务空间-apiKey-6375308.xlsx
-#   - tokenplan sheet (A1): sk-sp-... 为百炼 Token Plan 公共端点密钥
-#   - 默认业务空间 sheet: sk-ws-... 为企业版 MaaS 私有端点密钥
-# 优先级: 环境变量 > 内置默认值 > .env 文件(见下方 _load_dotenv)
-# 这样 clone 后不配置环境变量也能直接跑;线上/CI 通过环境变量覆盖即可。
-DEFAULT_DASHSCOPE_API_KEY = "sk-sp-H.YPEML.ugTC.MEUCIBiqFI-s5pSQCK87NMBeuXP936Rp1NMWUhgQ3Md8qmk1AiEAsxwK5Un2x1IwY_hHXoT_zweTPmqZ90IAQHOZ3CLV-Fo"
-DEFAULT_WORKSPACE_API_KEY = "sk-ws-H.EIPRIMY.gNWQ.MEUCIQDUpIXzjdRdGjY3OMADt7XI-Gy86ZYi25A0rTM6IcHV1AIgEwe9qWBdZQB2rEmzV5G_QPGPr4kDpWL94YO_qvVoyZ4"
+# ---------------------------------------------------------------- 密钥配置
+# 密钥一律不进仓库(P1-a):从环境变量或 .env 提供(优先级 环境变量 > .env),
+# 模板见 .env.example。此前 config.py 内置过真实密钥且已进入 git 历史
+# ——那些密钥必须视为泄露,请尽快在控制台轮换作废。
+DEFAULT_DASHSCOPE_API_KEY = ""
+DEFAULT_WORKSPACE_API_KEY = ""
 DEFAULT_WORKSPACE_BASE_URL = "https://llm-7dfb5cb9gwefuqdz.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
 DEFAULT_WORKSPACE_ID = "llm-7dfb5cb9gwefuqdz"
-DEFAULT_OPENAI_COMPATIBLE_URL = DEFAULT_WORKSPACE_BASE_URL  # 别名,见 Excel 描述
+DEFAULT_OPENAI_COMPATIBLE_URL = DEFAULT_WORKSPACE_BASE_URL  # 兼容别名
 
 # 环境变量 -> 默认值的映射,供 LLMClient fallback
 DEFAULT_API_KEYS: Dict[str, str] = {
@@ -82,10 +80,11 @@ _load_dotenv()
 
 
 def get_api_key(env_name: str) -> str:
-    """按优先级返回 API Key: 环境变量 > 内置默认值 > 空字符串。
+    """按优先级返回 API Key: 环境变量 > .env(_load_dotenv 注入)> 空字符串。
 
     - 高内聚:所有 key 解析收口于此,调用方无需散落 os.environ.get
     - 支持 MAAS_API_KEY 未配置时复用 DASHSCOPE_API_KEY(兼容历史配置)
+    - 密钥不进仓库:内置默认值恒为空(P1-a),缺失时 LLMClient 会给出明确报错
     """
     if not env_name:
         return ""
@@ -114,7 +113,7 @@ class ProviderConfig:
 
 PROVIDERS = {
     # 阿里云 DashScope(百炼)——OpenAI 兼容模式(公共端点)
-    # 默认 key 来源: Excel tokenplan sheet (sk-sp-...)
+    # key 来源: DASHSCOPE_API_KEY(env / .env;不进仓库)
     "qwen": ProviderConfig(
         name="qwen",
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -131,7 +130,7 @@ PROVIDERS = {
         text_model="moonshot-v1-32k",
     ),
     # 企业版 MaaS 私有端点(默认业务空间)
-    # 默认 key 来源: Excel 默认业务空间 sheet (sk-ws-...)
+    # key 来源: MAAS_API_KEY / DASHSCOPE_API_KEY(可复用 sk-ws-*;env / .env,不进仓库)
     # base_url: https://llm-7dfb5cb9gwefuqdz.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
     "maas": ProviderConfig(
         name="maas",
@@ -230,6 +229,10 @@ class RunConfig:
     event_sliding_window: float = 60.0  # 事件挖掘滑窗(步进 50% 叠加)
     event_min_width: float = 3.0        # 事件最小宽度(秒),key 事件必须 ≥ 该值
     event_density_min: float = 45.0     # 目标事件密度(个/小时)
+    # 按题材覆写事件密度门(P2-b):45/h 对低运动素材(lecture/interview 等)
+    # 几乎达不到,会让门禁形同虚设或被迫放水。schema 的 genre 枚举为键,
+    # 空表 = 全部走 event_density_min;未覆盖的 genre 同样回退默认值。
+    event_density_by_genre: Dict[str, float] = field(default_factory=dict)
     mosaic_pad_sec: float = 4.0         # 边界复核:span ±pad 取帧
     mosaic_frames: int = 64             # 8×8 马赛克帧数
     boundary_max_rounds: int = 2        # Refined/Split 后二次复核上限轮数
@@ -241,6 +244,8 @@ class RunConfig:
     min_qa_per_video: int = 10          # 下限
     qa_override: int = 0                # >0 时固定出题数(调试/兼容旧 --qa)
     qa_batch_size: int = 20             # 超长视频分批出题,每批上限
+    qa_anchor_cap: int = 150            # 喂给出题 prompt 的锚点池上限;0=不截断(A2-3)
+                                        # 全量池仍用于校验(anchors_by_id),此处仅影响提示词
     mcq_min_ratio: float = 0.5          # task_type 分布:mcq 50%~70%
     mcq_max_ratio: float = 0.7
     temporal_min_ratio: float = 0.15    # temporal_grounding 15%~25%

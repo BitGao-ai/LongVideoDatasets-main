@@ -111,8 +111,7 @@ class LLMClient:
         self.cfg = cfg
         self.pc = cfg.provider_cfg()
         self.is_local = (self.pc.name == LOCAL_PROVIDER_NAME)
-        # 配置通用且独立:统一走 config.get_api_key(),优先级 环境变量 > 内置默认值 > .env
-        # 最小范围修改:仅替换 key 获取逻辑,不改动重试/trace 等其它高内聚逻辑
+        # 配置通用且独立:统一走 config.get_api_key(),优先级 环境变量 > .env(P1-a:内置默认值已移除)
         key = get_api_key(self.pc.api_key_env) if self.pc.api_key_env else ""
         if not key:
             if self.is_local:

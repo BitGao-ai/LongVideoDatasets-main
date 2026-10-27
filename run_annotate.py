@@ -169,11 +169,16 @@ def main():
     p.add_argument("--frames", type=int, default=10, help="每窗口采样帧数(场景标注)")
     p.add_argument("--qa", type=int, default=0,
                    help="每视频出题数(0=按时长自动:ceil(hours×24),下限 10)")
+    p.add_argument("--qa-anchor-cap", type=int, default=150,
+                   help="喂给出题 prompt 的锚点池上限(时间四桶轮转采样;0=不截断,"
+                        "全量池仅用于校验,截断只影响提示词)")
     p.add_argument("--no-describe", action="store_true", help="关闭全片详述(默认必产)")
     p.add_argument("--describe-mode", default="frames", choices=["frames", "native_video"],
                    help="frames=抽帧(Qwen/Kimi 通用);native_video=原生视频片段(仅 Qwen,需 ffmpeg+dashscope)")
     p.add_argument("--native-fps", type=float, default=2.0, help="native_video 模式下的视频抽帧率")
     p.add_argument("--frame-rate", type=float, default=1.0, help="帧索引抽帧率(1fps 默认)")
+    p.add_argument("--frames-dir", default="", help="帧索引【根】目录:实际帧目录为 "
+                   "<frames-dir>/<video_id>/(归属隔离,默认 <structure 所在目录>/frames)")
     p.add_argument("--local-base-url", default="", help="本地小模型端点(vLLM):provider=local 时的主端点,兼做帧级描述/音频判别")
     p.add_argument("--local-model", default="", help="本地视觉模型名(如 Qwen/Qwen3-VL-8B-Instruct)")
     p.add_argument("--max-windows", type=int, default=0, help=">0 时只处理前 N 窗(调试)")
@@ -193,10 +198,12 @@ def main():
         window_sec=args.window_sec,
         frames_per_window=args.frames,
         qa_override=args.qa,
+        qa_anchor_cap=args.qa_anchor_cap,
         describe=not args.no_describe,
         describe_mode=args.describe_mode,
         native_fps=args.native_fps,
         frame_rate=args.frame_rate,
+        frame_index_dir=args.frames_dir,
         local_base_url=args.local_base_url,
         local_vision_model=args.local_model,
         max_windows=args.max_windows,

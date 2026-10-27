@@ -28,9 +28,12 @@ def describe_video(client: LLMClient, cfg: RunConfig, video_path: str,
     产出的文件缺 quiet_segments,QC 的 segment_gate 会假通过(D10)。
     """
     if store is None:
-        frames_dir = cfg.frame_index_dir or os.path.join(
+        frames_root = cfg.frame_index_dir or os.path.join(
             os.path.dirname(str(structure.get("_path") or ".")) or ".", "frames")
-        store = FrameStore(frames_dir, fps=cfg.frame_rate, max_edge=cfg.max_image_edge)
+        # 兜底构建同样按视频分目录(与 orchestrator/preprocess 布局一致,修复 A2-1)
+        frames_dir = os.path.join(frames_root, str(meta.get("video_id") or "v"))
+        store = FrameStore(frames_dir, fps=cfg.frame_rate, max_edge=cfg.max_image_edge,
+                           video_id=str(meta.get("video_id") or "v"))
         dur = float(meta.get("meta", {}).get("duration_sec", 0) or 0)
         store.set_duration(dur)
         store.build(video_path, force=cfg.force_frame_index)

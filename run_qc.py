@@ -64,6 +64,9 @@ def main():
     p.add_argument("--alpha-threshold", type=float, default=0.8)
     p.add_argument("--gold-threshold", type=float, default=0.9)
     p.add_argument("--miou-threshold", type=float, default=0.5)
+    p.add_argument("--event-density-min", type=float, default=None,
+                   help="事件密度门(个/小时)基线覆盖;题材覆写仍优先 "
+                        "(RunConfig.event_density_by_genre,默认 %.0f/h)" % RunConfig().event_density_min)
     p.add_argument("--report", default="reports/qc.json", help="报告 JSON 输出路径")
     p.add_argument("--release-report", default="reports/release_report.json",
                    help="发布报告 JSON 输出路径(门禁清单)")
@@ -86,6 +89,8 @@ def main():
     cfg = RunConfig(alpha_threshold=args.alpha_threshold, gold_threshold=args.gold_threshold,
                     miou_threshold=args.miou_threshold, provider=args.provider,
                     local_base_url=args.local_base_url, local_vision_model=args.local_model)
+    if args.event_density_min is not None:
+        cfg.event_density_min = args.event_density_min
     client = None
     if args.embedding:
         try:

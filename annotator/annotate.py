@@ -10,7 +10,8 @@
 
 import logging
 import time
-from typing import Dict, List, Tuple
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Optional, Tuple
 
 from . import prompts
 from .aggregate import aggregate_global
@@ -54,6 +55,9 @@ def annotate_structure(client: LLMClient, cfg: RunConfig, video_path: str,
     sid = 0
     eid = 0
 
+    # ---- 预处理循环:逐窗做缓存查取,未命中的窗进并发池(Res 修复 C/S1)----
+    jobs: List[Tuple[int, float, float, str, str]] = []
+    results: Dict[int, Optional[Dict]] = {}
     for wi, (ws, we) in enumerate(windows, 1):
         sub = subs_text(structure.get("subtitles", []), ws, we)
         ocr = ocr_text(structure.get("ocr", []), ws, we)
@@ -61,27 +65,31 @@ def annotate_structure(client: LLMClient, cfg: RunConfig, video_path: str,
 
         cached = cache.get("structure", key) if cache else None
         if cached:
-            for sc in cached.get("scenes", []):
-                sid += 1
-                sc["id"] = sid
-                sc.setdefault("shot_ids", [])
-                scenes.append(sc)
-            for ev in cached.get("events", []):
-                eid += 1
-                ev["id"] = f"e{eid}"
-                events.append(ev)
+            results[wi] = cached
             log.info("窗口 %d/%d 缓存复用", wi, len(windows))
-            continue
+        else:
+            jobs.append((wi, ws, we, sub, ocr))
+            results[wi] = None
 
-        ok, result = False, None
+    # ---- S1 窗口级并发:此前是纯串行,而 S1 是整条流水线调用次数最多的阶段 ----
+    # 每个 worker 内部独立重试(指数退避);pool.map 按提交序返回,保证下面的
+    # 编号(scene id / event id)与缓存落盘次序和串行完全一致 —— 产物不允许
+    # 随完成顺序漂移。
+    def _annotate_window(job: Tuple[int, float, float, str, str]) -> Optional[Dict]:
+        wi, ws, we, sub, ocr = job
+        frames_reuse: List[Tuple[float, str]] = []   # P2-c:重试间复用已抽帧
         for attempt in range(cfg.max_window_retries):
-            frames = sample_frames(video_path, ws, we, cfg.frames_per_window,
-                                   cfg.max_image_edge, store=store)
+            frames = frames_reuse or sample_frames(video_path, ws, we,
+                                                   cfg.frames_per_window,
+                                                   cfg.max_image_edge, store=store)
             if not frames:
+                # 抽帧为空才重新抽;其余失败帧复用 —— 相同输入下重试的价值在 LLM 端
+                frames_reuse = []
                 log.warning("窗口 %d [%.0f-%.0fs] 抽帧为空,重试 %d/%d",
                             wi, ws, we, attempt + 1, cfg.max_window_retries)
                 time.sleep(min(2 ** attempt, 30))
                 continue
+            frames_reuse = frames
             content = [text_part(prompts.scene_user(ws, we, sub, ocr, meta))]
             content += [image_part(b64) for _, b64 in frames]
             try:
@@ -91,16 +99,32 @@ def annotate_structure(client: LLMClient, cfg: RunConfig, video_path: str,
                     vision=True,
                 )
                 if isinstance(out, dict) and (out.get("scenes") or out.get("events")):
-                    result, ok = out, True
-                    break
+                    return out
                 log.warning("窗口 %d 输出为空(第 %d/%d 次),重试", wi, attempt + 1,
                             cfg.max_window_retries)
             except Exception as e:  # noqa: BLE001
                 log.error("窗口 %d 标注失败(第 %d/%d 次): %s", wi, attempt + 1,
                           cfg.max_window_retries, e)
             time.sleep(min(2 ** attempt, 30))
+        return None
 
-        if not ok:
+    if jobs:
+        uncached_ids = {j[0] for j in jobs}
+        workers = max(1, min(cfg.workers, len(jobs)))
+        if workers > 1:
+            log.info("S1 窗口标注并发:%d 窗 / %d 线程", len(jobs), workers)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            concurrent = list(pool.map(_annotate_window, jobs))
+        for (wi, _ws, _we, _sub, _ocr), out in zip(jobs, concurrent):
+            results[wi] = out
+
+    # ---- 汇编循环:按窗口索引序统一编号 / 记 gap / 落缓存(确定性核心)----
+    for wi, (ws, we) in enumerate(windows, 1):
+        sub = subs_text(structure.get("subtitles", []), ws, we)
+        ocr = ocr_text(structure.get("ocr", []), ws, we)
+        key = {"stage": "window_annotate", "span": (ws, we), "subs": sub, "ocr": ocr}
+        result = results.get(wi)
+        if result is None:
             gaps.append({"start": ws, "end": we,
                          "reason": f"窗口标注重试 {cfg.max_window_retries} 次仍失败"})
             log.error("窗口 %d [%.0f-%.0fs] 已写入 gaps,后续出题/验收会拦截", wi, ws, we)
@@ -116,10 +140,11 @@ def annotate_structure(client: LLMClient, cfg: RunConfig, video_path: str,
             ev["id"] = f"e{eid}"
             ev.setdefault("causes", [])
             events.append(ev)
-        if cache:
+        if cache and wi in uncached_ids:
             cache.put("structure", key, {"scenes": result.get("scenes", []),
                                          "events": result.get("events", [])})
-        log.info("窗口 %d/%d 完成:累计 %d 场景, %d 事件", wi, len(windows), len(scenes), len(events))
+        log.info("窗口 %d/%d 完成:累计 %d 场景, %d 事件",
+                 wi, len(windows), len(scenes), len(events))
 
     # 覆盖校验(Res 3.6):union(windows) 应覆盖 [0,duration];失败窗口另行暴露
     dur = duration or float(meta["meta"]["duration_sec"])

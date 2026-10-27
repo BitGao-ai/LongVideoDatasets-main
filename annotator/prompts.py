@@ -546,3 +546,26 @@ def temporal_verify_user(q: Dict, tile_times: List[float], side: int) -> str:
         "请只根据画面定位该事件的起止时刻,不要参考问题以外的信息,"
         "也不要假设事件一定占满整个范围。"
     )
+
+
+OPEN_VERIFY_SYS = (
+    "你是长视频开放题验证员。你会看到证据区间的真实采样画面(或无画面时给出的"
+    "全片分镜文本),请【只依据所给材料】独立写下你的答案。"
+    "不得凭空编造视频中未出现的细节;材料不足以作答时明确说明。"
+    '只输出 JSON: {"answer": str, "confidence": 0~1, "reasons": {"zh": str, "en": str}}。'
+)
+
+
+def open_verify_user(q: Dict, segments_text: str = "", evidence_note: str = "") -> str:
+    """open/summary 独立核验(P1-b):不告知参考答案,要求验证者独立作答。
+
+    - open:verifier 看证据帧(≤6 张)作答 —— 6 帧足以核验单点细节;
+    - summary:全片梗概无法靠几张帧核验,改为给分镜/片段文本独立概括(无画面)。
+    """
+    seg = f"\n全片分镜/片段文本(独立概括的唯一依据):\n{segments_text}\n" \
+        if segments_text else ""
+    return (
+        f"题目: {_question_text(q)}\n"
+        f"{evidence_note or '以下画面是题目证据区间的采样,请依据画面独立作答。'}"
+        f"{seg}"
+    )

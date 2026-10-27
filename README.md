@@ -1,4 +1,6 @@
-# LongVideo-Dataset · 长视频理解测评集 · LLM 自动标注 v2
+# 视界通鉴 VideoChronicle · 长视频理解测评集 · LLM 自动标注 v2
+
+> LongVideo-Datasets 工程仓 · 数据集正式名称：**视界通鉴（VideoChronicle，简称 VC-Bench）**
 
 用 **Qwen(DashScope)/ Kimi(Moonshot)** 多模态大模型 API,对 **30min–2h 长视频**做自动数据标注,
 输出严格符合 `schema/annotation.schema.json` 的中英双语标注结果。
@@ -56,13 +58,15 @@ tests/                        # 纯逻辑回归测试(pytest,无需视频/API ke
 
 ```
 视频 + 人工元信息(meta)
-  → preprocess.py          : shots / subtitles / ocr / 音频事件轨 / 帧索引(frames/) / manifest
-  → S1 structure           : 逐 ~180s 窗口送【采样帧+字幕+OCR】→ scenes / events(失败重试→gaps,不静默)
+  → preprocess.py          : shots / subtitles / ocr / 音频事件轨 / 帧索引(frames/<id>/,按视频分设) / manifest
+  → S1 structure           : 逐 ~180s 窗口送【采样帧+字幕+OCR】→ scenes / events(失败重试→gaps,不静默;窗内并发,重试复用已抽帧)
   → S2 describe            : shot.desc → segment 详述 → 全片两级汇总(质量门:字数/要素/时间锚点,自愈重试)
   → S3 events              : 事件挖掘(滑窗帧描述轮廓)→ 8×8 马赛克边界复核 → 去重 → key/minor 分级
   → S4 aggregate           : 梗概 / 人物表(确定性统计)/ 关系 / 时间线 / 因果边核验 / 主题 / 转折 / 伏笔
-  → S5 qa                  : 锚定出题(MCQ+temporal+open+summary,题干指代上下文,能力矩阵硬约束)
-  → S6 verify              : 另一家供应商看真实证据帧核验答案(不一致打回重写)+ 梗概泄漏剔除
+  → S5 qa                  : 锚定出题(MCQ+temporal+open+summary,题干指代上下文,能力矩阵硬约束;
+                             prompt 锚点按时间四桶截断(--qa-anchor-cap,默认 150),校验仍用全量池)
+  → S6 verify              : mcq 另一家供应商看真实证据帧核验(不一致打回重写)+ 梗概泄漏剔除;
+                             open/summary 独立核验(open 看证据帧,summary 读分镜文本,低一致仅打 flag)
   → S7 filter              : 五通道抗捷径(盲答/单帧/字幕/梗概/语言先验),命中默认剔除
   → 难度标定 → 组装为 schema v2 JSON,校验后落盘(review_status=draft)
 ```
@@ -79,24 +83,61 @@ tests/                        # 纯逻辑回归测试(pytest,无需视频/API ke
 ## 安装
 
 ```bash
+# 1) 建虚拟环境并安装基础依赖(含 jsonschema,标注校验必需)
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-# 预处理依赖较重,建议单独虚拟环境:
-# pip install "scenedetect[opencv]" whisperx paddleocr paddlepaddle-gpu
+pip install pytest   # 仅跑 tests/ 需要
+
+# 2) 预处理依赖较重,建议单独虚拟环境(与标注环境隔离):
+pip install "scenedetect[opencv]" whisperx paddleocr paddlepaddle
+# Mac / 无 GPU 用 CPU 版:pip install paddlepaddle(不要 -gpu)
+# Mac 安装 ffmpeg(帧索引首选,无则自动回退 cv2 顺序解码):
+brew install ffmpeg
+# 无 brew 时用 pip 静态二进制(本机实测方案,已写入 requirements.txt):
+pip install "imageio-ffmpeg>=0.5"
+FF=$(python -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())")
+ln -sf "$FF" .venv/bin/ffmpeg
+ffmpeg -version   # 能输出版本号才算就绪(.venv/bin/ffmpeg 或 ~/.local/bin/ffmpeg 在 PATH 即可)
 ```
+
+> 现状实测:本仓 `.venv` 只有 `openai/opencv/numpy`,缺 `jsonschema/pytest`,
+> 且缺 `ffmpeg/scenedetect/whisperx/paddleocr/dashscope`。先补齐再跑,
+> 否则 `run_annotate` 会报 `未安装 jsonschema,无法校验产物`,
+> `preprocess` 会报模块缺失,`pytest` 直接 `No module named pytest`。
 
 ## 配置 API Key
 
 ```bash
-# Qwen(阿里云百炼 DashScope)
+cp .env.example .env   # 本仓已自带 .env,可跳过;优先用环境变量覆盖
+# Qwen(阿里云百炼 DashScope,公共端点,默认 provider=qwen,开箱即用)
 export DASHSCOPE_API_KEY=sk-xxx
-# 或 Kimi(Moonshot)
+# 企业版 MaaS 私有端点(provider=maas/workspace/qwen-maas)
+export MAAS_API_KEY=sk-ws-xxx
+# 或 Kimi(Moonshot,做 --verify-provider/--provider kimi 复核时必需)
 export MOONSHOT_API_KEY=sk-xxx
-# 答案核验/复筛用另一家时,两家 key 都要有
 ```
+
+> 代码会自动读项目根 `.env`(见 `annotator/config.py:_load_dotenv`),
+> 优先级:环境变量 > .env(config.py 已不再内置任何密钥,缺失时报明确错误)。
+> 当前 `.env` 里 `MOONSHOT_API_KEY` 是注释掉的空值,用 kimi 前必须先填。
+>
+> **密钥治理**:`.env` 已被 `.gitignore` 排除、严禁入库;本仓历史曾内置过
+> 真实密钥,**请视为已泄露并在控制台轮换作废**(清历史可用 `git filter-repo`)。
 
 > 模型名在 `annotator/config.py` 里改。请按你开通的版本填,例如
 > `qwen-vl-max` / `qwen2.5-vl-72b-instruct`(视觉)、`qwen-plus`(文本);
 > Kimi 用 `moonshot-v1-32k-vision-preview`(视觉)、`moonshot-v1-32k`(文本)。
+
+## 运行前检查(必做,3 条不过就别往下跑)
+
+```bash
+source .venv/bin/activate
+python -c "import jsonschema; print('jsonschema ok')"  # 缺失则 pip install -r requirements.txt
+ffmpeg -version          # 缺失则 brew install ffmpeg
+ls videos/               # 当前 videos/ 是空目录,先放入 .mp4/.mkv/.mov 等
+ls structure/ meta/ annotations/ 2>/dev/null || echo "首跑无产物属正常"
+```
 
 ## 运行
 
@@ -106,17 +147,21 @@ export MOONSHOT_API_KEY=sk-xxx
 ### 批量运行(推荐,一次处理文件夹下所有视频)
 
 ```bash
-# 0) 说话人分离 token(可选;不设则跳过说话人分离)
+source .venv/bin/activate
+# 0) 说话人分离 token(可选;不设则跳过说话人分离,subtitle_meta.diarize_failed=true)
 export HF_TOKEN=xxx
 
 # ---- ① 预处理:videos/ 下所有视频 ----
 # 产物:structure/<id>.json(结构)+ structure/frames/<id>/(帧索引)+ structure/<id>.manifest.json
 # 已存在自动跳过(--force 重跑);输出目录用 --structure-dir 改(默认 structure/)
-python preprocess.py --videos-dir videos --lang zh
+# 注意:Mac/无 GPU 必须加 --device cpu(默认 cuda 会直接报错);显存不足再加 --whisper-model small --whisper-batch 8
+# 依赖:scenedetect+whisperx+paddleocr+ffmpeg 缺一不可;只要帧索引可加 --skip-ocr 先跑通
+python preprocess.py --videos-dir videos --lang zh --device cpu
 
 # ---- ② LLM 标注:structure/ 下所有结果 ----
 # 产物:annotations/<id>.json(标注结果);meta 缺失时自动生成到 meta/<id>.json
 # 输出目录用 --out-dir 改(默认 annotations/);meta 目录用 --meta-dir 改(默认 meta/)
+# provider 可选 qwen(默认,读 DASHSCOPE_API_KEY)/maas/workspace/qwen-maas(读 MAAS_API_KEY)/kimi(读 MOONSHOT_API_KEY)/local
 python run_annotate.py --in structure/ --provider qwen \
     --meta-dir meta --out-dir annotations --videos-dir videos
 
@@ -124,11 +169,16 @@ python run_annotate.py --in structure/ --provider qwen \
 python run_describe.py --in annotations/ --out-dir annotations_desc/ --provider qwen
 
 # ---- ④ (可选)换模型复筛:annotations/ 下所有文件 ----
+# 初标 qwen→复筛 kimi(反之亦然);两家 key 都要有,当前 .env 缺 MOONSHOT 时先 export
 export MOONSHOT_API_KEY=sk-xxx
 python run_rescreen.py --in annotations/ --out-dir annotations_rescreened/ \
     --provider kimi --report reports/rescreen.json
 
 # ---- ⑤ (可选)质检:整个 annotations/ 批次 ----
+# reviews/responses.json 需先从模板复制并填写,见 examples/responses_template.json
+mkdir -p reviews reports
+cp -n examples/responses_template.json reviews/responses.json
+# 按模板填好验证者作答后再跑:
 python run_qc.py --annotations annotations/ --responses reviews/responses.json \
     --report reports/qc.json --release-report reports/release_report.json
 ```
@@ -150,20 +200,25 @@ reports/            -- 复筛/质检报告 与 llm_trace_<id>.jsonl(LLM 调用�
 ### 单条运行(单个视频 / 单个标注文件)
 
 ```bash
+source .venv/bin/activate
 # 0) 说话人分离 token(可选)
 export HF_TOKEN=xxx
 
 # ---- ① 预处理:单个视频 ----
 # 产物:--out 指定的 JSON(structure/doc_00001.json)+ 同目录 frames/doc_00001/(帧索引)
 # + doc_00001.manifest.json;--out 缺省写入 structure/<id>.json
+# Mac/无 GPU 加 --device cpu;CPU 跑不动 OCR 可先加 --skip-ocr 调通链路
 python preprocess.py --video videos/doc_00001.mp4 --video-id doc_00001 \
-    --lang en --out structure/doc_00001.json
+    --lang en --out structure/doc_00001.json --device cpu
 
 # ---- ② 准备 meta(拷贝模板改字段:license/source/release_date 等须人工填) ----
+mkdir -p meta
 cp examples/meta_template.json meta/doc_00001.json
+# 然后手动改 genre/title/license,缺失时批量模式会自动生成占位 meta 但发布前必须人工补全
 
 # ---- ③ LLM 标注:单个视频 ----
 # (v2:全片详述默认必产;--qa 留空=按时长自动出题)
+# 发布前建议加 --verify-provider kimi(需 MOONSHOT_API_KEY,另一家模型独立核验答案)
 python run_annotate.py \
     --meta      meta/doc_00001.json \
     --structure structure/doc_00001.json \
@@ -180,8 +235,12 @@ python run_rescreen.py --in annotations/doc_00001.json \
     --out-dir annotations_rescreened/ --provider kimi
 
 # ---- ⑥ (可选)质检:单个标注文件 ----
+mkdir -p reviews reports
+cp -n examples/responses_template.json reviews/responses.json
+# 填好 reviews/responses.json 后再跑:
 python run_qc.py --annotations annotations/doc_00001.json \
-    --responses reviews/responses.json --report reports/qc.json
+    --responses reviews/responses.json --report reports/qc.json \
+    --release-report reports/release_report.json
 ```
 
 单条产物位置:标注结果由 `--out` 指定;预处理时 `--out` 指定结构 JSON,
@@ -203,6 +262,8 @@ python run_qc.py --annotations annotations/doc_00001.json \
 | `--no-describe` | 关闭全片详述(默认必产) |
 | `--describe-mode native_video` | 原生视频模式(仅 Qwen,需 ffmpeg+dashscope) |
 | `--frame-rate` | 帧索引抽帧率(默认 1fps) |
+| `--frames-dir` | 帧索引【根】目录:实际帧目录为 `<frames-dir>/<video_id>/`(归属隔离,防跨视频串帧) |
+| `--qa-anchor-cap` | 喂出题 prompt 的锚点池上限(时间四桶轮转采样,默认 150;0=不截断,校验仍用全量池) |
 | `--local-base-url` / `--local-model` | 启用本地小模型做帧描述/音频判别 |
 | `--max-windows N` | 调试:只跑前 N 个窗口 |
 | `--keep-shortcut` | 命中捷径只标记不剔除 |
@@ -267,6 +328,8 @@ python run_describe.py --in annotations/ --out-dir annotations_desc/ --provider 
 - **证据锚定**:锚点池 = 关键事件(优先)∪ 普通事件 ∪ 显著镜头 ∪ 音频事件;每题强制绑定
   `evidence_spans`,题干必须含**指代上下文**(时间描述 / 序数消歧词 / 命名锁定短语),
   不满足自动重写 ≤2 次,仍不过剔除;
+  喂给模型的锚点按时间四桶轮转截断(`--qa-anchor-cap`,默认 150;全量池仅用于校验)——
+  2h 长片全量注入会顶爆上下文(≈100–200k tokens);
 - **能力矩阵硬约束**(代码门禁,非 prompt 口头要求):L1~L5 每层 ≥2 题、cross_scene ≥50%、
   task_type 分布(mcq 50–70% / temporal 15–25%)、时长 4 桶每桶 ≥15%;不达标时出题提示词
   注入缺口,最终 `qa_coverage` 报告未达标即发布拦截;
@@ -281,7 +344,11 @@ python run_describe.py --in annotations/ --out-dir annotations_desc/ --provider 
 
 - `run_annotate.py --verify-provider kimi`:标注时即让另一家模型看**真实证据帧**独立作答,
   与生成答案不一致 → 打回重写(≤2 次),结果写 `q.verification {provider, agreement, pass}`;
-  梗概泄漏命中直接剔除并记 `quality_flag`;`verify_agreement` 作为 KPI 进 manifest。
+  梗概泄漏命中直接剔除并记 `quality_flag`;`verify_agreement` 作为 KPI 进 manifest;
+  **open/summary 也会核验**(P1-b):open 让验证者看证据帧(≤6)独立作答,summary 无帧可看、
+  改为读 `structure.segments` 分镜文本独立概括,再与 `reference_answer` 比文本相似度;
+  低于 `open_sim_threshold` → `open_verify_low_agreement=1`(相似度是开放式表达的弱信号,
+  不默认剔除,交由人工抽测与 QC 一致率门);无第二家供应商时 `pass=None` 不作假。
 - `run_rescreen.py`:对每题按 task_type 重跑对应捷径通道(盲答/单帧/字幕/梗概/语言先验、
   temporal 字幕定位、open 盲答相似度),两家判定**取或**,追加 `cross_check` 留痕。
 
@@ -321,7 +388,7 @@ python run_rescreen.py --in annotations/ --out-dir annotations_rescreened/ \
 | temporal mIoU | 验证者区间 vs 参考答案 IoU | 合格率 ≥ 90%(单题 IoU ≥ 0.5) |
 | open/summary | ROUGE-L / embedding 相似度一致 | 一致率 ≥ 0.6 |
 | 覆盖率 | annotation_meta.gaps 为空 | 0 gaps |
-| 事件密度 | events / 时长 | ≥ 45/h;key 事件 span 100% 有效 |
+| 事件密度 | events / 时长 | ≥ 45/h(或题材覆写:`--event-density-min` 基线 + `RunConfig.event_density_by_genre[genre]` 查表);key 事件 span 100% 有效 |
 | 描述门 | shot.desc 全非空;quiet_segments 为空 | 100% |
 | 双语 | question 中英齐备 | ≥ 95% |
 
@@ -329,8 +396,8 @@ python run_rescreen.py --in annotations/ --out-dir annotations_rescreened/ \
 # 标准答案与黄金题(is_gold)自动从 --annotations 读取;
 # 验证者独立作答见 examples/responses_template.json(三种题型作答字段)
 python run_qc.py --annotations annotations/ --responses reviews/responses.json \
-    --alpha-threshold 0.8 --gold-threshold 0.9 --report reports/qc.json \
-    --release-report reports/release_report.json
+    --alpha-threshold 0.8 --gold-threshold 0.9 --event-density-min 45 \
+    --report reports/qc.json --release-report reports/release_report.json
 ```
 
 输出:α 及是否达标、每位标注员黄金题正确率与复训标记、需打回的题清单、
@@ -381,9 +448,13 @@ scene_id / scene_alignment`。`segments` 与 `detailed_description` 默认必产
 ## 测试
 
 ```bash
-pip install pytest
+source .venv/bin/activate
+pip install -r requirements.txt pytest   # 必须含 jsonschema,否则 meta schema 用例会 skip/失败
 python -m pytest tests/ -q     # 185 项;不需要视频/API key/GPU(cv2 自动 stub,LLM 走假件)
 ```
+
+> 实测本机 185 passed(需 jsonschema+pytest 齐全)。当前 `.venv` 缺这两包,
+> 直接跑会 `No module named pytest`。
 
 覆盖:帧索引文件名↔时间戳往返(各 fps)、窗口覆盖校验、MCQ 结构校验、中文 ROUGE-L、
 音频事件边界、详述质量门与重试、马赛克去重复帧与状态机、抗捷径通道与并发确定性、

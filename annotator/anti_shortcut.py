@@ -186,6 +186,10 @@ def check_one(client: LLMClient, cfg: RunConfig, video_path: str,
                 if b64:
                     content = [text_part(prompts.frame_user(q)), image_part(b64)]
                     base["single_frame_pass"] = (_ask(client, content, vision=True) == gold)
+                elif not any("single_frame_skipped" in n for n in base["checked_note"]):
+                    # 真机 cv2 打不开视频时 one_frame 返回 None 而非抛错(无 stub 时),
+                    # 同样记一笔跳过,否则取帧失败会静默无留痕。
+                    base["checked_note"].append("single_frame_skipped: empty frame")
 
         # --- 梗概 / 语言先验:与题目模态无关,所有 MCQ 都要跑(修复 B4)---
         # 此前这两个通道被写在 `if _is_visual(q):` 内部,凡是 L1_audio_asr /

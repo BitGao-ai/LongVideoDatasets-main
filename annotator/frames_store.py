@@ -78,16 +78,24 @@ def _encode_jpg(img: np.ndarray, max_edge: int, quality: int = 85) -> Optional[s
 class FrameStore:
     """帧索引:文件系统即数据库,文件名即时间戳。
 
+    归属:每个视频的帧放在 <frames_root>/<video_id>/ 子目录;index.json 记录
+    video_id,get_or_load 时做归属校验——否则批量标注会把 A 视频的帧喂给
+    B 视频的提示词(串帧),且 build() 见目录已有 index.json 就直接复用,不会发生任何报错。
+
     Attributes:
         frames_dir: 帧序列目录(内含 index.json 元信息)。
         fps: 抽帧率(默认 1fps)。
         max_edge: 导出帧长边上限。
+        video_id: 期望归属的视频 ID(空 = 不做归属校验,兼容旧调用点)。
     """
 
-    def __init__(self, frames_dir: str, fps: float = 1.0, max_edge: int = 768):
+    def __init__(self, frames_dir: str, fps: float = 1.0, max_edge: int = 768,
+                 video_id: str = ""):
         self.frames_dir = os.path.abspath(frames_dir)
         self.fps = float(fps)
         self.max_edge = int(max_edge)
+        self._expected_video_id = str(video_id or "")
+        self._owner: str = ""                                # index.json 记录的归属
         self._index: Optional[Dict[int, float]] = None      # {frame_no: t}
         self._times: Optional[List[float]] = None           # 升序时间列表
         self._time_to_no: Optional[Dict[float, int]] = None  # {t: frame_no} 反查
@@ -206,11 +214,35 @@ class FrameStore:
         except (OSError, ValueError, KeyError) as e:
             log.warning("index.json 读取失败,将重建: %s", e)
             self._index, self._times, self._duration = None, None, 0.0
+            return
+        self._check_ownership(meta)
+
+    def _check_ownership(self, meta: Dict) -> None:
+        """目录归属校验:防止批量模式下帧目录被跨视频串用(修复 A2-1)。
+
+        旧版 orchestrator 把所有视频的帧都写到同一个 frames/ 平铺目录,index.json
+        先建先占——A 视频抽帧,B 视频进来直接复用,马赛克/单帧全是 B 的画面。
+        这里读 index.json 里的 video_id 与期望值比对;旧索引无该字段时按
+        "目录名即归属" 约定回填(目录名 == video_id 才放行)。
+        """
+        owner = str(meta.get("video_id", "") or "")
+        if not owner:
+            owner = os.path.basename(self.frames_dir)
+            log.warning("index.json 无 video_id 字段(旧版本生成),按目录名回填归属: %s", owner)
+        if self._expected_video_id and owner != self._expected_video_id:
+            raise RuntimeError(
+                f"帧索引归属不符: {self.frames_dir} 属于视频 {owner!r},"
+                f"当前视频 {self._expected_video_id!r}。帧根目录下应按视频分子目录 "
+                f"(<frames_root>/{self._expected_video_id}/),请检查 --frames-dir 是否跨视频复用")
+        self._owner = owner
 
     def _write_index(self) -> None:
         import json
+        if not self._owner:
+            self._owner = self._expected_video_id or os.path.basename(self.frames_dir)
         index_path = os.path.join(self.frames_dir, "index.json")
         meta = {
+            "video_id": self._owner,
             "fps": self.fps,
             "max_edge": self.max_edge,
             "duration_sec": self._duration,
@@ -256,15 +288,24 @@ class FrameStore:
         if abs(times[0]) > tolerance:
             raise RuntimeError(f"verify_index: 首帧时间 {times[0]:.3f}s 偏离 0 超过 {tolerance}s")
         dur = duration_sec or self._duration
-        if dur and abs(times[-1] - dur) > tolerance:
-            log.warning("verify_index: 末帧 %.3fs 与视频时长 %.3fs 偏差 %.3fs(>%.1fs),请检查",
-                        times[-1], dur, abs(times[-1] - dur), tolerance)
+        if dur:
+            # 末帧偏差必须 raise(A2-4):旧版只 warning, duration 写错(实测 899s、
+            # meta 3600s)的索引会被静默放行,整个时间轴全错为主线 —— 烧完 LLM 才发现。
+            # 容差下限 = 1/fps + 0.5s:1fps 下最后一帧(整秒取整)与真实时长天然可差 ~1s。
+            tol = max(tolerance, 1.0 / self.fps + 0.5)
+            if abs(times[-1] - dur) > tol:
+                raise RuntimeError(
+                    f"verify_index: 末帧 {times[-1]:.3f}s 与视频时长 {dur:.3f}s 偏差 "
+                    f"{abs(times[-1] - dur):.3f}s(>{tol:.1f}s)。帧索引与视频不匹配,"
+                    "请重跑 preprocess.py 重建帧索引,并核对 meta.duration_sec / "
+                    "--frames-dir 是否指向了别的视频的帧目录")
         log.info("verify_index 通过:%d 帧 [%.3f, %.3f]s", len(times), times[0], times[-1])
         return True
 
     def stats(self) -> Dict[str, object]:
         self._ensure_index()
-        return {"frames_dir": self.frames_dir, "fps": self.fps, "frame_count": len(self._index or {}),
+        return {"frames_dir": self.frames_dir, "fps": self.fps, "video_id": self._owner,
+                "frame_count": len(self._index or {}),
                 "duration_sec": self._duration or ((self._times or [0])[-1] if self._times else 0.0)}
 
     # ------------------------------------------------------------ 读取 API

@@ -2,13 +2,13 @@
 openai>=1.30          # 统一走 OpenAI 兼容接口调用 Qwen(DashScope)/ Kimi(Moonshot)
 opencv-python>=4.8    # 抽帧
 numpy>=1.24
-jsonschema>=4.0       # 输出按 schema 校验
+jsonschema>=4.0       # 输出按 schema 校验(缺失则 run_annotate 无法校验产物)
+pytest>=8.0           # 仅跑 tests/ 需要
+dashscope>=1.17       # 详述 native_video 模式(仅 Qwen);另需 ffmpeg(见下)
+imageio-ffmpeg>=0.5   # 无 brew 时提供静态 ffmpeg(二进制链到 .venv/bin/ffmpeg)
 
-# === 详述 native_video 模式(可选,仅 Qwen)===
-# dashscope>=1.17     # 原生视频输入(MultiModalConversation);另需系统安装 ffmpeg
-
-# === 预处理(preprocess.py,建议独立虚拟环境安装)===
-# scenedetect[opencv]>=0.6   # 镜头分割
-# whisperx>=3.1              # 中英字幕 + 词级时间戳 + 说话人
-# paddleocr>=2.7             # 屏幕文字 OCR
-# paddlepaddle-gpu           # 或 paddlepaddle(CPU)
+# === 预处理(preprocess.py,Mac CPU 实测已装好,可直接装在同一 .venv)===
+scenedetect[opencv]>=0.6   # 镜头分割
+whisperx>=3.1              # 中英字幕 + 词级时间戳 + 说话人(含 torch,体积大)
+paddleocr>=2.7             # 屏幕文字 OCR
+paddlepaddle               # Mac/无 GPU 用 CPU 版;Linux 有 GPU 才换 paddlepaddle-gpu

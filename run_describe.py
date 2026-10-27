@@ -42,11 +42,15 @@ def describe_file(path: str, client: LLMClient, cfg: RunConfig, out_path: str) -
     video_path = ann.get("media", {}).get("video_path", "")
     dur = float(ann.get("meta", {}).get("duration_sec", 0) or 0)
 
-    # 帧索引:优先复用上次标注的 frames_dir,否则就地构建
-    frames_dir = cfg.frame_index_dir or ann.get("annotation_meta", {}) \
-        .get("frames_index", {}).get("frames_dir") or os.path.join(
-            os.path.dirname(path) or ".", "frames", ann.get("video_id", "v"))
-    store = FrameStore(frames_dir, fps=cfg.frame_rate, max_edge=cfg.max_image_edge)
+    # 帧索引:优先复用上次标注的 frames_dir;--frames-dir 按【根】目录解释(<root>/<video_id>)
+    _vid = str(ann.get("video_id", "v"))
+    frames_dir = ann.get("annotation_meta", {}) \
+        .get("frames_index", {}).get("frames_dir")
+    if not frames_dir:
+        frames_root = cfg.frame_index_dir or os.path.join(os.path.dirname(path) or ".", "frames")
+        frames_dir = os.path.join(frames_root, _vid)
+    store = FrameStore(frames_dir, fps=cfg.frame_rate, max_edge=cfg.max_image_edge,
+                       video_id=_vid)
     store.set_duration(dur)
     store.build(video_path, force=cfg.force_frame_index)
     store.verify_index(dur)
@@ -89,6 +93,8 @@ def main():
     p.add_argument("--window-sec", type=float, default=180.0)
     p.add_argument("--frames", type=int, default=12, help="每窗口采样帧数(详述可略多)")
     p.add_argument("--frame-rate", type=float, default=1.0, help="帧索引抽帧率")
+    p.add_argument("--frames-dir", default="", help="帧索引【根】目录:实际帧目录为 "
+                   "<frames-dir>/<video_id>/(默认优先用标注文件里记录的路径)")
     p.add_argument("--agg-group", type=int, default=15, help="两级汇总的分组大小")
     p.add_argument("--max-windows", type=int, default=0)
     args = p.parse_args()
@@ -97,6 +103,7 @@ def main():
                     describe_mode=args.describe_mode, native_fps=args.native_fps,
                     describe_frames_per_window=args.frames, describe_agg_group=args.agg_group,
                     frame_rate=args.frame_rate, max_windows=args.max_windows,
+                    frame_index_dir=args.frames_dir,
                     local_base_url=args.local_base_url, local_vision_model=args.local_model)
     client = LLMClient(cfg)
 

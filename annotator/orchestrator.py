@@ -59,6 +59,25 @@ def _video_duration(video_path: str, fallback: float = 0.0) -> float:
     return fallback
 
 
+#: meta.duration_sec 与视频实测时长的容忍偏差(秒)。超出即在烧 LLM 前拦截。
+_DURATION_MISMATCH_SEC = 5.0
+
+
+def _assert_duration_consistent(dur: float, real_dur: float, video_id: str) -> None:
+    """meta 与视频实测时长的硬校验(A2-4)。
+
+    时长写错(实测 899s、meta 记 3600s)会让窗口切分 / QA span / 事件轴整片
+    标偏,且烧的是真金白银的 LLM 调用 —— 在任何 LLM 调用开始前拦截。
+    实测失败(=0)时不拦,保留原有"时长兜底"路径。
+    """
+    if dur > 0 and real_dur > 0 and abs(dur - real_dur) > _DURATION_MISMATCH_SEC:
+        raise RuntimeError(
+            f"meta.duration_sec({dur:.1f}s) 与视频实测时长({real_dur:.1f}s)相差 "
+            f"{abs(dur - real_dur):.1f}s(>{_DURATION_MISMATCH_SEC}s)。请先修正 "
+            f"{video_id} 的 meta.duration_sec 或重跑 preprocess.py;时长不一致时"
+            "继续标注只会产出整片错位的时间轴")
+
+
 def _validate(annotation: Dict, schema_path: Optional[str]) -> str:
     """按 schema 校验产物;返回 '' 表示通过,否则返回错误摘要。
 
@@ -230,12 +249,20 @@ def annotate_video(meta_path: str, structure_path: str, out_path: str,
         meta["meta"]["duration_sec"] = round(dur, 3)
     meta["meta"].setdefault("duration_bucket", duration_bucket(dur))
 
+    # meta vs 实测时长硬校验(A2-4),见 _assert_duration_consistent
+    _assert_duration_consistent(dur, _video_duration(video_path), video_id)
+
     # ---- 基础设施 ----
     struct_dir = os.path.dirname(os.path.abspath(structure_path)) or "."
     manifest = Manifest.load_or_create(video_id,
                                        os.path.join(struct_dir, f"{video_id}.manifest.json"))
-    frames_dir = cfg.frame_index_dir or os.path.join(struct_dir, "frames")
-    store = FrameStore(frames_dir, fps=cfg.frame_rate, max_edge=cfg.max_image_edge)
+    frames_root = cfg.frame_index_dir or os.path.join(struct_dir, "frames")
+    # 帧目录必须按视频分设:index.json 记录归属(A2-1 修复)。
+    # 旧版把所有视频的帧平铺到同一目录,B 视频进来直接复用 A 的 index.json——马赛克/单帧
+    # 全是 A 的画面,且无任何报错。
+    frames_dir = os.path.join(frames_root, video_id)
+    store = FrameStore(frames_dir, fps=cfg.frame_rate, max_edge=cfg.max_image_edge,
+                       video_id=video_id)
     store.set_duration(dur)
     store.build(video_path, force=cfg.force_frame_index)
     store.verify_index(dur)
@@ -423,7 +450,8 @@ def annotate_video(meta_path: str, structure_path: str, out_path: str,
         log.info("---- S6 双模型答案核验 + 梗概泄漏防护 ----")
         ok, res, err = retry_exp_backoff(
             lambda: qa_verify.verify_qa_answers(qa, client, verify_client, cfg,
-                                                store, global_block),
+                                                store, global_block,
+                                                structure=structure),
             retries=3, logger=log)
         if ok:
             qa, vstats = res

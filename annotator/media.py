@@ -122,19 +122,39 @@ def ocr_text(ocr: List[Dict], start: float, end: float) -> str:
 def build_windows(shots: List[Dict], window_sec: float) -> List[Tuple[float, float]]:
     """把连续镜头合并成不超过 window_sec 的窗口,对齐镜头边界。
 
+    单镜头超过 window_sec 时按固定步长硬切(A2-2 修复):lecture / 口播 / 会议
+    等单机位长镜头在旧实现下只产出 1 个窗口——2h 视频只标 1 窗,窗口级注释
+    完全失去时间定位。硬切后的尾段(可能 < window_sec)保持软边界,继续按
+    原有贪心语义与后续镜头合并,窗口仍按时间升序且互不跨界。
+
     若没有镜头信息(shots 为空),调用方应回退到固定步长切窗。
     """
     if not shots:
         return []
     shots = sorted(shots, key=lambda s: s["start"])
+    # 展平成原子段:(start, end, hard_prev)。
+    # hard_prev=True 表示与前一段是【同一超长镜头内部】的硬切边界,不得并窗
+    # ——否则切开的镜头又会被贪心合并重新拼成长窗。首片硬切前置边界为软
+    #(可与上一镜头常规合并,实际受窗口长度约束同样拼不进去)。
+    atoms: List[Tuple[float, float, bool]] = []
+    for sh in shots:
+        s, e = float(sh["start"]), float(sh["end"])
+        if e - s <= window_sec:
+            atoms.append((s, e, False))
+            continue
+        t = s
+        while t < e:
+            atoms.append((t, min(t + window_sec, e), t > s))
+            t += window_sec
+    # 与旧实现完全一致的贪心合并:能装进一个窗口就延续,否则开新窗
     windows: List[Tuple[float, float]] = []
-    cur_s, cur_e = shots[0]["start"], shots[0]["end"]
-    for sh in shots[1:]:
-        if sh["end"] - cur_s <= window_sec:
-            cur_e = sh["end"]
+    cur_s, cur_e = atoms[0][0], atoms[0][1]
+    for s, e, hard_prev in atoms[1:]:
+        if (not hard_prev) and e - cur_s <= window_sec:
+            cur_e = e
         else:
             windows.append((round(cur_s, 3), round(cur_e, 3)))
-            cur_s, cur_e = sh["start"], sh["end"]
+            cur_s, cur_e = s, e
     windows.append((round(cur_s, 3), round(cur_e, 3)))
     return windows
 

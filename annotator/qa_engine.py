@@ -315,6 +315,50 @@ def _question_key(q: Dict) -> str:
     return f"{zh or en}|{q.get('answer') or ''}"
 
 
+def _cap_anchor_pool(anchors: List[Dict], cap: int, used_anchor_ids: set,
+                     duration: float) -> List[Dict]:
+    """出题 prompt 的锚点池截断(A2-3),校验仍用全量池。
+
+    旧版 generate_qa 把锚点池全量注入出题提示词:2h×1600 镜头 ≈ 40 万字符
+    (≈100–200k tokens),直接顶爆供应商上下文;且 token 花费集中在大量
+    minor 镜头上,关键事件反而被稀释。
+
+    截断策略:时间轴四等分桶 + 每桶轮转取样,保证首/中/尾都有锚点进 prompt;
+    桶内优先级 = 未用过的锚点 > key 事件 > span 早的。返回列表按 span 升序,
+    与旧 prompt 的时间顺序观感一致。
+    cap<=0 视为不截断;池子本身不超过 cap 时原样返回。
+    """
+    if cap <= 0 or len(anchors) <= cap:
+        return anchors
+
+    def _span_of(a: Dict) -> Tuple[float, float]:
+        p = _as_pair(a.get("span"))
+        return p if p else (0.0, 0.0)
+
+    denom = max(float(duration or 0.0), max((_span_of(a)[1] for a in anchors), default=1.0), 1.0)
+    buckets: List[List[Dict]] = [[], [], [], []]
+    for a in anchors:
+        s, e = _span_of(a)
+        b = min(3, int(((s + e) / 2.0) / denom * 4.0))
+        buckets[b].append(a)
+
+    used = set(u for u in (used_anchor_ids or []) if u)
+    for b in buckets:
+        b.sort(key=lambda a: (a.get("anchor_id") in used,
+                              a.get("importance") != "key",
+                              _span_of(a)[0]))
+
+    out: List[Dict] = []
+    i = 0
+    while len(out) < cap and any(buckets):
+        b = buckets[i % 4]
+        if b:
+            out.append(b.pop(0))
+        i += 1
+    out.sort(key=_span_of)
+    return out
+
+
 def generate_qa(client: LLMClient, cfg: RunConfig, scenes: List[Dict],
                 events: List[Dict], global_block: Dict, meta: Dict,
                 structure: Optional[Dict] = None, duration: float = 0.0,
@@ -338,6 +382,7 @@ def generate_qa(client: LLMClient, cfg: RunConfig, scenes: List[Dict],
     used_anchors = {q.get("anchor_id") for q in qa if q.get("anchor_id")}
     reused_anchor = 0
     duplicates = 0
+    prompted = 0
     rounds = 0
     max_rounds = 2 + quota // cfg.qa_batch_size + (1 if quota % cfg.qa_batch_size else 0)
 
@@ -353,9 +398,11 @@ def generate_qa(client: LLMClient, cfg: RunConfig, scenes: List[Dict],
             "cross_scene_min_ratio": cfg.cross_scene_min_ratio,
             "used_anchor_ids": sorted(a for a in used_anchors if a),
         }
-        # 未用过的锚点优先排前面,让模型自然覆盖到新证据
-        fresh = [a for a in anchors if a["anchor_id"] not in used_anchors]
-        pool = (fresh + [a for a in anchors if a["anchor_id"] in used_anchors]) if fresh else anchors
+        # 未用过的锚点优先排前面,让模型自然覆盖到新证据;
+        # prompt 侧池子按时间四桶轮转截断(A2-3),全量池仅用于校验——
+        # 2h 长片全量注入会顶爆上下文(≈100–200k tokens)
+        pool = _cap_anchor_pool(anchors, cfg.qa_anchor_cap, used_anchors, duration)
+        prompted = len(pool)
         try:
             out = client.complete(
                 [{"role": "system", "content": prompts.QA_SYS},
@@ -385,8 +432,8 @@ def generate_qa(client: LLMClient, cfg: RunConfig, scenes: List[Dict],
             fixed["qid"] = f"{video_id}_q{len(qa) + 1:02d}"
             qa.append(fixed)
             added += 1
-        log.info("出题第 %d 轮:%d 道原始 -> 新增 %d 道(重复 %d)-> 累计 %d/%d",
-                 rounds, len(raw), added, duplicates, len(qa), quota)
+        log.info("出题第 %d 轮:%d 道原始 -> 新增 %d 道(重复 %d)-> 累计 %d/%d(prompt 池 %d/%d)",
+                 rounds, len(raw), added, duplicates, len(qa), quota, prompted, len(anchors))
         if not added and not raw:
             log.warning("本轮未产出任何题目,提前结束出题")
             break
@@ -396,6 +443,7 @@ def generate_qa(client: LLMClient, cfg: RunConfig, scenes: List[Dict],
     coverage["duplicates_dropped"] = duplicates
     coverage["anchors_used"] = len(used_anchors)
     coverage["anchors_total"] = len(anchors)
+    coverage["anchors_prompted"] = prompted
     coverage["target"] = quota
     if not coverage["pass"]:
         log.warning("能力矩阵未达标:%s(发布门禁将拦截)", coverage["checks"])

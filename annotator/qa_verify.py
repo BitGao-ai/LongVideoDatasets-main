@@ -20,7 +20,7 @@ from . import prompts
 from .config import RunConfig
 from .frames_store import FrameStore
 from .llm_client import LLMClient, image_part, text_part
-from .utils import asym_pad, clamp, miou
+from .utils import asym_pad, clamp, miou, text_similarity
 
 log = logging.getLogger("annotator.qa_verify")
 
@@ -124,6 +124,64 @@ def _verify_temporal(q: Dict, verifier: LLMClient, cfg: RunConfig,
             "reasons": out.get("reasons") or {"zh": "", "en": ""}}
 
 
+def _ref_text(q: Dict) -> str:
+    """open/summary 参考答案的纯文本(schema:reference_answer {zh,en})。"""
+    ref = q.get("reference_answer") or {}
+    if isinstance(ref, str):
+        return ref
+    if isinstance(ref, dict):
+        return (ref.get("zh") or "").strip() or (ref.get("en") or "").strip()
+    return ""
+
+
+def _verify_open(q: Dict, verifier: LLMClient, cfg: RunConfig,
+                 store: Optional[FrameStore], segments_text: str) -> Optional[Dict]:
+    """open/summary 独立核验(P1-b):验证者先作答,再与参考答案比相似度。
+
+    - open:验证者看证据帧(≤6)独立作答;
+    - summary:文本相似度对开放式表达是弱信号,故有独立 flag 而非硬剔除。
+    任何失败返回 None(verification.pass=None 留痕,不假装通过)。
+    """
+    ref = _ref_text(q)
+    if not ref:
+        return None
+    try:
+        if q.get("task_type") == "summary" or store is None:
+            # summary / 无帧索引:用分镜文本独立作答(纯文本,不用视觉通道)
+            if not segments_text.strip():
+                return None
+            content = [text_part(prompts.open_verify_user(
+                q, segments_text=segments_text,
+                evidence_note="该题为全片梗概,没有单张画面可核验,请阅读分镜文本独立概括。"))]
+            out = verifier.complete(
+                [{"role": "system", "content": prompts.OPEN_VERIFY_SYS},
+                 {"role": "user", "content": content}],
+                vision=False)
+        else:
+            frames = _evidence_frames(q, store, cfg)
+            if not frames:
+                return None
+            content = [text_part(prompts.open_verify_user(q))]
+            content += [image_part(f["b64"]) for f in frames]
+            out = verifier.complete(
+                [{"role": "system", "content": prompts.OPEN_VERIFY_SYS},
+                 {"role": "user", "content": content}],
+                vision=True)
+    except Exception as e:  # noqa: BLE001
+        log.warning("open/summary 核验调用失败(%s): %s", q.get("qid"), e)
+        return None
+    ans = (out or {}).get("answer") if isinstance(out, dict) else None
+    if not isinstance(ans, str) or not ans.strip():
+        return None
+    try:
+        conf = float(out.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    sim = text_similarity(verifier, ans, ref)
+    return {"answer": ans[:400], "similarity": round(sim, 3), "confidence": conf,
+            "reasons": out.get("reasons") or {"zh": "", "en": ""}}
+
+
 def _regen_answer(client: LLMClient, q: Dict, feedback: str) -> Optional[Dict]:
     try:
         out = client.complete(
@@ -139,10 +197,11 @@ def _regen_answer(client: LLMClient, q: Dict, feedback: str) -> Optional[Dict]:
 
 def _verify_one(q: Dict, primary: LLMClient, verifier: Optional[LLMClient],
                 cfg: RunConfig, store: Optional[FrameStore],
-                synopsis: Optional[str]) -> Tuple[Optional[Dict], Dict]:
+                synopsis: Optional[str], segments_text: str = "") -> Tuple[Optional[Dict], Dict]:
     """单题:梗概泄漏 → 双模型核验 → 打回重写。返回 (保留的题 or None, 计数)。"""
     cnt = {"verified": 0, "agreed": 0, "regen": 0, "synopsis_leak_dropped": 0,
-           "mismatch": 0, "temporal_verified": 0, "temporal_pass": 0}
+           "mismatch": 0, "temporal_verified": 0, "temporal_pass": 0,
+           "open_verified": 0, "open_pass": 0}
 
     # 梗概泄漏通道(Res 5.4):题干+梗概可答 → 剔除
     if cfg.synopsis_leak_check and synopsis and q.get("task_type") == "mcq":
@@ -182,6 +241,33 @@ def _verify_one(q: Dict, primary: LLMClient, verifier: Optional[LLMClient],
             q.setdefault("quality_flags", []).append("temporal_miou_low=1")
             log.info("temporal 区间核验不合格 %s(mIoU=%.2f < %.2f)",
                      q.get("qid"), verdict["miou"], cfg.miou_threshold)
+        return q, cnt
+
+    if q.get("task_type") in ("open", "summary"):
+        # P1-b:open/summary 独立核验。仅跨供应商(verifier)有效 —— 主模型自检
+        # 自己出的题没有交叉意义;无 verifier 时 pass=None 留待人工抽测。
+        if not cfg.verify_answers or verifier is None:
+            q["verification"] = {"provider": None, "agreement": None, "pass": None,
+                                 "reason": "无核验供应商,未核验"}
+            return q, cnt
+        verdict = _verify_open(q, verifier, cfg, store, segments_text)
+        if verdict is None:
+            q["verification"] = {"provider": verifier.pc.name, "agreement": None,
+                                 "pass": None, "reason": "核验无有效返回或无参考文本"}
+            return q, cnt
+        passed = verdict["similarity"] >= cfg.open_sim_threshold
+        cnt["open_verified"] = 1
+        cnt["open_pass"] = 1 if passed else 0
+        q["verification"] = {"provider": verifier.pc.name, "agreement": passed,
+                             "pass": passed, "similarity": verdict["similarity"],
+                             "verifier_text": verdict["answer"],
+                             "confidence": verdict["confidence"]}
+        if not passed:
+            # 相似度是开放式表达的弱信号:不默认剔除,打 flag 留给人工抽测
+            #(mcq 才走硬剔除,见 verify_mismatch)
+            q.setdefault("quality_flags", []).append("open_verify_low_agreement=1")
+            log.info("open/summary 核验相似度低 %s(sim=%.2f < %.2f)",
+                     q.get("qid"), verdict["similarity"], cfg.open_sim_threshold)
         return q, cnt
 
     if not cfg.verify_answers or verifier is None or q.get("task_type") != "mcq" or not store:
@@ -245,17 +331,33 @@ def _verify_one(q: Dict, primary: LLMClient, verifier: Optional[LLMClient],
     return q, cnt
 
 
+def _segments_text(structure: Optional[Dict], limit_chars: int = 12000) -> str:
+    """summary 核验用的全片分镜/片段文本(截断上限防撑爆上下文)。"""
+    if not structure:
+        return ""
+    lines = []
+    for seg in (structure.get("segments") or []):
+        d = seg.get("desc") or {}
+        txt = (d.get("zh") or "").strip() or (d.get("en") or "").strip()
+        if txt:
+            lines.append(f"[{float(seg.get('start') or 0):.0f}-{float(seg.get('end') or 0):.0f}s] {txt}")
+    return "\n".join(lines)[:limit_chars]
+
+
 def verify_qa_answers(qa: List[Dict], primary: LLMClient, verifier: Optional[LLMClient],
                       cfg: RunConfig, store: Optional[FrameStore],
-                      global_block: Optional[Dict] = None) -> Tuple[List[Dict], Dict]:
+                      global_block: Optional[Dict] = None,
+                      structure: Optional[Dict] = None) -> Tuple[List[Dict], Dict]:
     """双模型核验 + 梗概泄漏检测。返回 (qa, stats)。
 
     verifier 为另一家供应商;None/缺 key 时跳过核验(verification.pass=None)。
+    structure 用于 summary 题的独立文本核验(P1-b)。
     题目之间彼此独立,按题并发(C7);保留顺序与输入一致。
     """
     stats = {"verified": 0, "agreed": 0, "regen": 0, "verify_agreement": None,
              "synopsis_leak_dropped": 0, "verify_mismatch_dropped": 0,
-             "temporal_verified": 0, "temporal_pass": 0, "temporal_miou_ratio": None}
+             "temporal_verified": 0, "temporal_pass": 0, "temporal_miou_ratio": None,
+             "open_verified": 0, "open_pass": 0, "open_agreement": None}
     if not qa:
         return [], stats
 
@@ -263,11 +365,13 @@ def verify_qa_answers(qa: List[Dict], primary: LLMClient, verifier: Optional[LLM
     if global_block:
         syn = global_block.get("synopsis") or {}
         synopsis = syn.get("zh") or syn.get("en")
+    segments_text = _segments_text(structure)
 
     workers = max(1, min(cfg.workers, len(qa)))
     results: List[Optional[Dict]] = [None] * len(qa)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futs = {pool.submit(_verify_one, q, primary, verifier, cfg, store, synopsis): i
+        futs = {pool.submit(_verify_one, q, primary, verifier, cfg, store, synopsis,
+                            segments_text): i
                 for i, q in enumerate(qa)}
         for fut in as_completed(futs):
             i = futs[fut]
@@ -280,7 +384,7 @@ def verify_qa_answers(qa: List[Dict], primary: LLMClient, verifier: Optional[LLM
                 kept_q, cnt = qa[i], {}
             results[i] = kept_q
             for k in ("verified", "agreed", "regen", "synopsis_leak_dropped",
-                      "temporal_verified", "temporal_pass"):
+                      "temporal_verified", "temporal_pass", "open_verified", "open_pass"):
                 stats[k] += cnt.get(k, 0)
             if cnt.get("mismatch") and kept_q is None:
                 stats["verify_mismatch_dropped"] += 1
@@ -290,9 +394,12 @@ def verify_qa_answers(qa: List[Dict], primary: LLMClient, verifier: Optional[LLM
     stats["verify_agreement"] = round(stats["agreed"] / n_ver, 3) if n_ver else None
     n_tv = stats["temporal_verified"]
     stats["temporal_miou_ratio"] = round(stats["temporal_pass"] / n_tv, 3) if n_tv else None
+    n_op = stats["open_verified"]
+    stats["open_agreement"] = round(stats["open_pass"] / n_op, 3) if n_op else None
     log.info("双模型核验:%d 题(%d 并发),一致率 %s;temporal 区间核验 %d 题,合格率 %s;"
-             "梗概泄漏剔除 %d;打回重写 %d 次;核验不一致剔除 %d",
+             "open/summary 独立核验 %d 题,一致率 %s;梗概泄漏剔除 %d;打回重写 %d 次;"
+             "核验不一致剔除 %d",
              n_ver, workers, stats["verify_agreement"], n_tv,
-             stats["temporal_miou_ratio"], stats["synopsis_leak_dropped"],
-             stats["regen"], stats["verify_mismatch_dropped"])
+             stats["temporal_miou_ratio"], n_op, stats["open_agreement"],
+             stats["synopsis_leak_dropped"], stats["regen"], stats["verify_mismatch_dropped"])
     return kept, stats
